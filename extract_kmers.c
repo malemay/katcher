@@ -11,17 +11,21 @@
 // The length of the k-mers
 #define KMER_LENGTH 31
 
+// The maximum number of k-mers that the program can process
+#define MAX_KMERS 1000
+
 // Creating a global table used to translate 4-bit integers into chars
 char nt_table[16] = {'*', 'A', 'C', '*',
                     'G', '*', '*', '*',
                     'T', '*', '*', '*',
                     '*', '*', '*', 'N'};
 
-// This program takes a bam file and a k-mer as input, and outputs all
-// reads containing this kmer or its reverse complement in SAM format
+// This program takes a bam file and a list of k-mers as input, and outputs all
+// reads containing these kmers or their reverse complement in SAM format
 // The output SAM file has no header in the current implementation
+// The k-mer list must be a text file with one k-mer per line
 
-// Usage extract_kmers <in.bam> <kmer_sequence> > out.sam
+// Usage extract_kmers <in.bam> <kmer_list.txt> > out.sam
 
 // A function that takes the read sequence as encoded by 4-bit nucleotides
 // in the BAM format and converts it to a string
@@ -39,16 +43,17 @@ int main(int argc, char* argv[]) {
 
 	// Checking the input
 	if(argc != 3) {
-		fprintf(stderr, "Usage: %s <in.bam> <kmer_sequence> > out.sam\n", argv[0]);
+		fprintf(stderr, "Usage: %s <in.bam> <kmer_list.txt> > out.sam\n", argv[0]);
 		return 1;
 	}
 
 	// Processing the command-line arguments
 	char *input_file = argv[1];
-	char *kmer_forward = argv[2], *kmer_reverse = NULL;
+	FILE *kmer_list = fopen(argv[2], "r");
+	char **forward_kmers, **reverse_kmers;
 
 	// Declaring simple variables
-	int write_op, read_op;
+	int write_op, read_op, n_kmers = 0;
 	int32_t seqlength;
 	uint8_t *bamseq = NULL;
 	char *seq = (char*) malloc(READ_ALLOC * sizeof(char));
@@ -66,9 +71,27 @@ int main(int argc, char* argv[]) {
 
 	bam1_t *alignment = bam_init1();
 
-	// Creating a reverse-complemented version of the k-mer
-	kmer_reverse = (char*) malloc((KMER_LENGTH + 1) * sizeof(char));
-	if(revcomp(kmer_forward, kmer_reverse) != 0) return 2;
+	// Allocating memory for the k-mer arrays and reading the k-mers from file
+	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
+	reverse_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
+
+	for(int i = 0; i < MAX_KMERS; i++) {
+		forward_kmers[i] = (char*) malloc((KMER_LENGTH + 2) * sizeof(char));
+		reverse_kmers[i] = (char*) malloc((KMER_LENGTH + 2) * sizeof(char));
+	}
+
+	while(fgets(forward_kmers[n_kmers], KMER_LENGTH + 2, kmer_list) != NULL) {
+		// Removing the newline character from the string	
+		forward_kmers[n_kmers][strcspn(forward_kmers[n_kmers], "\n")] = '\0';
+		fprintf(stderr, "Read kmer %s\n", forward_kmers[n_kmers]);
+		n_kmers++;
+	}
+
+	// Creating a reverse-complemented version of the k-mers
+	for(int i = 0; i < n_kmers; i++) {
+		if(revcomp(forward_kmers[i], reverse_kmers[i]) != 0) return 2;
+		fprintf(stderr, "Generated reverse-complemented sequence %s for: %s\n", reverse_kmers[i], forward_kmers[i]);
+	}
 
 	// Loop over the alignments in the bam file
 	while((read_op = sam_read1(input, header, alignment)) > 0) {
@@ -79,13 +102,17 @@ int main(int argc, char* argv[]) {
 		// Filling the seq memory segment with the character sequence
 		bamseq_to_char(bamseq, seq, seqlength);
 
-		// Output to file if the k-mer is found within the sequence
-		if(strstr(seq, kmer_forward) != NULL) {
-			write_op = sam_write1(output, header, alignment);
-		}
+		// Iterating over all the k-mers
+		for(int i = 0; i < n_kmers; i++) {
 
-		if(strstr(seq, kmer_reverse) != NULL) {
-			write_op = sam_write1(output, header, alignment);
+			// Output to file if the k-mer is found within the sequence
+			if(strstr(seq, forward_kmers[i]) != NULL) {
+				write_op = sam_write1(output, header, alignment);
+			}
+
+			if(strstr(seq, reverse_kmers[i]) != NULL) {
+				write_op = sam_write1(output, header, alignment);
+			}
 		}
 
 	}
@@ -96,12 +123,20 @@ int main(int argc, char* argv[]) {
 	// Freeing the file handles and memory allocated
 	sam_close(input);
 	sam_close(output);
+	fclose(kmer_list);
 
 	sam_hdr_destroy(header);
 	bam_destroy1(alignment);
 
-	free(kmer_reverse);
 	free(seq);
+
+	for(int i = 0; i < n_kmers; i++) {
+		free(forward_kmers[i]);
+		free(reverse_kmers[i]);
+	}
+
+	free(forward_kmers);
+	free(reverse_kmers);
 
 	return 0;
 }
@@ -143,14 +178,16 @@ int revcomp(char *forward, char *reverse) {
 				break;
 
 			default:
-				fprintf(stderr, "Error! Unknown nucleotide found in k-mer sequence");
+				fprintf(stderr, "Error! Unknown nucleotide found in k-mer sequence %s\n", forward);
 				return 1;
 		}
 
-		return 0;
+
 	}
 
 	// Ending the array with a NULL character to indicate the end of the string
 	reverse[KMER_LENGTH] = '\0';
+
+	return 0;
 }
 
