@@ -1,77 +1,83 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
+#include <string.h>
 
 #include "sam.h"
 
 // The amount of memory allocated for the read sequence
 #define READ_ALLOC 500
-// The length of the kmers being queried
+
+// The length of the k-mers
 #define KMER_LENGTH 31
 
 // Creating a global table used to translate 4-bit integers into chars
-char n_table[16] = {'*', 'A', 'C', '*',
+char nt_table[16] = {'*', 'A', 'C', '*',
                     'G', '*', '*', '*',
                     'T', '*', '*', '*',
                     '*', '*', '*', 'N'};
 
 // This program takes a bam file and a k-mer as input, and outputs all
 // reads containing this kmer or its reverse complement in SAM format
+// The output SAM file has no header in the current implementation
 
 // Usage extract_kmers <in.bam> <kmer_sequence> > out.sam
 
-void intseq_to_char(uint8_t *intseq, char *seq, int seqlength);
-void revcomp(char *forward, char *reverse);
+// A function that takes the read sequence as encoded by 4-bit nucleotides
+// in the BAM format and converts it to a string
+// bamseq: a pointer to the start of the sequence in the BAM file
+// seq: a pointer to an array of characters large enough to hold the read sequence
+// seqlength: the length of the read sequence (in nucleotides)
+void bamseq_to_char(uint8_t *bamseq, char *seq, int seqlength);
+
+// A function that generates the reverse-complemented version of a k-mer
+// forward: a pointer to an array of characters holding the forward k-mer
+// reverse: a pointer to an array of characters that will hold the reverse k-mer (must be sufficiently large)
+int revcomp(char *forward, char *reverse);
 
 int main(int argc, char* argv[]) {
-	// Checking and processing the command-line arguments
-	char *input_bam = argv[1];
 
-	char *kmer_forward = kmer_forward = argv[2];
+	// Checking the input
+	if(argc != 3) {
+		fprintf(stderr, "Usage: %s <in.bam> <kmer_sequence> > out.sam\n", argv[0]);
+		return 1;
+	}
 
-	char *kmer_reverse = (char*) malloc((KMER_LENGTH + 1) * sizeof(char));
-	revcomp(kmer_forward, kmer_reverse);
+	// Processing the command-line arguments
+	char *input_file = argv[1];
+	char *kmer_forward = argv[2], *kmer_reverse = NULL;
 
-	// Reading the input from the file on the command line
-	samFile *bamfile = sam_open(input_bam, "r");
-
-	// The output is written to stdout
-	samFile *output = hts_open("-", "w");
-
-	// Initializing the sam header
-	sam_hdr_t *header = sam_hdr_init();
-
-	// Initializing the alignment record (will be recycled)
-	bam1_t *alignment = bam_init1();
-
-	// The length of the sequence
+	// Declaring simple variables
+	int write_op, read_op;
 	int32_t seqlength;
-
-	// A pointer to the sequence itself
-	uint8_t *intseq = NULL;
-
-	// A pointer to a character version of the sequence
+	uint8_t *bamseq = NULL;
 	char *seq = (char*) malloc(READ_ALLOC * sizeof(char));
 
-	// Variables for holding the result of I/O operations
-	int write_op;
-	int read_op;
+	// Declaring and initializing htslib-related variables
+	samFile *input = sam_open(input_file, "r");
+	assert(input != NULL);
 
-	// Reading the header and ouputting it as is
-	header = sam_hdr_read(bamfile);
+	samFile *output = hts_open("-", "w");
+	assert(output != NULL);
+
+	sam_hdr_t *header = sam_hdr_init();
+	header = sam_hdr_read(input);
 	assert(header != NULL);
 
-	//write_op = sam_hdr_write(output, header);
-	//assert(write_op == 0);
+	bam1_t *alignment = bam_init1();
+
+	// Creating a reverse-complemented version of the k-mer
+	kmer_reverse = (char*) malloc((KMER_LENGTH + 1) * sizeof(char));
+	if(revcomp(kmer_forward, kmer_reverse) != 0) return 2;
 
 	// Loop over the alignments in the bam file
-	while((read_op = sam_read1(bamfile, header, alignment)) > 0) {
+	while((read_op = sam_read1(input, header, alignment)) > 0) {
 		// Get a pointer to the sequence and the length of the sequence
-		intseq = bam_get_seq(alignment);
+		bamseq = bam_get_seq(alignment);
 		seqlength = alignment->core.l_qseq;
 
 		// Filling the seq memory segment with the character sequence
-		intseq_to_char(intseq, seq, seqlength);
+		bamseq_to_char(bamseq, seq, seqlength);
 
 		// Output to file if the k-mer is found within the sequence
 		if(strstr(seq, kmer_forward) != NULL) {
@@ -84,28 +90,29 @@ int main(int argc, char* argv[]) {
 
 	}
 
+	// Making sure that we reached the EOF
 	assert(read_op == -1);
 	
-	// Freeing the memory allocated
+	// Freeing the file handles and memory allocated
+	sam_close(input);
+	sam_close(output);
+
 	sam_hdr_destroy(header);
 	bam_destroy1(alignment);
-	sam_close(bamfile);
-	sam_close(output);
+
 	free(kmer_reverse);
 	free(seq);
 
 	return 0;
 }
 
-// A function that takes a pointer to a sequence in a bam record
-// (encoded with 4 bits) and uses another pointer (seq) to fill
-// a seqlength-long sequence represented as characters
-void intseq_to_char(uint8_t *intseq, char *seq, int seqlength) {
+// bamseq_to_char
+void bamseq_to_char(uint8_t *bamseq, char *seq, int seqlength) {
 
 	int i;
 
 	for(i = 0; i < seqlength; i++) {
-		seq[i] = n_table[bam_seqi(intseq, i)];
+		seq[i] = nt_table[bam_seqi(bamseq, i)];
 	}
 
 	// Appending a NULL character so that this is understood as a string
@@ -114,8 +121,8 @@ void intseq_to_char(uint8_t *intseq, char *seq, int seqlength) {
 	return;
 }
 
-// A function that performs the reverse complement of a k-mer sequence
-void revcomp(char *forward, char *reverse) {
+// revcomp
+int revcomp(char *forward, char *reverse) {
 
 	for(int i = 0; i < KMER_LENGTH; i++) {
 		switch (forward[i]) {
@@ -136,9 +143,11 @@ void revcomp(char *forward, char *reverse) {
 				break;
 
 			default:
-				printf("Error! Unknown nucleotide found in k-mer sequence");
-				break;
+				fprintf(stderr, "Error! Unknown nucleotide found in k-mer sequence");
+				return 1;
 		}
+
+		return 0;
 	}
 
 	// Ending the array with a NULL character to indicate the end of the string
