@@ -3,6 +3,8 @@
 #include <assert.h>
 #include <string.h>
 
+#include <pthread.h>
+
 #include "sam.h"
 
 // The amount of memory allocated for the read sequence
@@ -12,13 +14,10 @@
 #define KMER_LENGTH 31
 
 // The maximum number of k-mers that the program can process
-#define MAX_KMERS 1000
+#define MAX_KMERS 5000
 
-// Creating a global table used to translate 4-bit integers into chars
-char nt_table[16] = {'*', 'A', 'C', '*',
-                    'G', '*', '*', '*',
-                    'T', '*', '*', '*',
-                    '*', '*', '*', 'N'};
+// The number of threads that the program can use
+#define N_THREADS 5
 
 // This program takes a bam file and a list of k-mers as input, and outputs all
 // reads containing these kmers or their reverse complement in SAM format
@@ -26,6 +25,35 @@ char nt_table[16] = {'*', 'A', 'C', '*',
 // The k-mer list must be a text file with one k-mer per line
 
 // Usage extract_kmers <in.bam> <kmer_list.txt> > out.sam
+//
+// Creating a global table used to translate 4-bit integers into chars
+char nt_table[16] = {'*', 'A', 'C', '*',
+                    'G', '*', '*', '*',
+                    'T', '*', '*', '*',
+                    '*', '*', '*', 'N'};
+
+// A struct that holds the data required for a single thread to execute
+// kmers: a pointer to the first k-mer associated with this thread
+// n_kmers: the number of k-mers to process on this thread
+// output: a pointer to the output SAM file where the results are written
+// header: a pointer to the header of the input BAM file
+// alignment: a pointer to the alignment record being processed
+// seq: a pointer to the character array containing the nucleotide sequence of the read
+typedef struct kmer_data {
+	// Constant members to be set before traversing the file
+	char **kmers;
+	int n_kmers;
+	samFile *output;
+	sam_hdr_t *header;
+
+	// Members that must be update for each record in the file
+	bam1_t *alignment;
+	char *seq;
+
+} kmer_data;
+
+// A global lock used to prevent threads from writing to the output file simultaneously
+pthread_mutex_t lock;
 
 // A function that takes the read sequence as encoded by 4-bit nucleotides
 // in the BAM format and converts it to a string
@@ -38,6 +66,9 @@ void bamseq_to_char(uint8_t *bamseq, char *seq, int seqlength);
 // forward: a pointer to an array of characters holding the forward k-mer
 // reverse: a pointer to an array of characters that will hold the reverse k-mer (must be sufficiently large)
 int revcomp(char *forward, char *reverse);
+
+// A function that allows matching sequence and k-mers with multithreading
+void *match_kmers(void *input);
 
 int main(int argc, char* argv[]) {
 
@@ -53,10 +84,14 @@ int main(int argc, char* argv[]) {
 	char **forward_kmers, **reverse_kmers;
 
 	// Declaring simple variables
-	int write_op, read_op, n_kmers = 0;
+	int write_op, read_op, n_chunks, kmers_per_chunk, n_kmers = 0;
+	long long int n_processed = 0;
 	int32_t seqlength;
 	uint8_t *bamseq = NULL;
 	char *seq = (char*) malloc(READ_ALLOC * sizeof(char));
+
+	// Declaring an array containing the data processed by each thread
+	kmer_data *thread_chunks;
 
 	// Declaring and initializing htslib-related variables
 	samFile *input = sam_open(input_file, "r");
@@ -70,6 +105,9 @@ int main(int argc, char* argv[]) {
 	assert(header != NULL);
 
 	bam1_t *alignment = bam_init1();
+
+	// Declaring the array of threads
+	pthread_t *threads = NULL;
 
 	// Allocating memory for the k-mer arrays and reading the k-mers from file
 	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
@@ -93,6 +131,58 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "Generated reverse-complemented sequence %s for: %s\n", reverse_kmers[i], forward_kmers[i]);
 	}
 
+	// Setting the data for multithreading
+	assert((n_kmers * 2) % N_THREADS == 0);
+
+	// Creating a common array with both forward and reverse k-mers together
+	char **all_kmers = (char**) malloc(n_kmers * 2 * sizeof(char*));
+
+	for(int i = 0; i < n_kmers; i++) {
+		all_kmers[i * 2] = forward_kmers[i];
+		all_kmers[i * 2 + 1] = reverse_kmers[i];
+	}
+
+	/* DEBUG
+	for(int i = 0; i < (n_kmers * 2); i++) {
+		fprintf(stderr, "all_kmers[%d]: %s\n", i, all_kmers[i]);
+	}
+	DEBUG */
+
+	// Creating an array of kmer_data structs with as many elements as there are threads
+	kmers_per_chunk = (n_kmers * 2) / N_THREADS;
+	n_chunks = (n_kmers * 2) / kmers_per_chunk;
+	thread_chunks = (kmer_data*) malloc(n_chunks * sizeof(kmer_data));
+
+	// Initializing the chunk elements
+	for(int i = 0; i < n_chunks; i++) {
+		thread_chunks[i].kmers = all_kmers + i * kmers_per_chunk;
+		thread_chunks[i].n_kmers = kmers_per_chunk;
+		thread_chunks[i].output = output;
+		thread_chunks[i].header = header;
+		thread_chunks[i].alignment = alignment;
+		thread_chunks[i].seq = seq;
+	}
+
+	/* DEBUG
+	for(int i = 0; i < n_chunks; i++) {
+		fprintf(stderr, "Chunk #%d:\n", i);
+		for(int j = 0; j < thread_chunks[i].n_kmers; j++) {
+			fprintf(stderr, "%s\n", thread_chunks[i].kmers[j]);
+		}
+	}
+
+	return 0;
+	DEBUG */
+
+	// Creating the array of threads
+	threads = (pthread_t*) malloc(N_THREADS * sizeof(pthread_t));
+
+	// Initializing the lock
+	if(pthread_mutex_init(&lock, NULL) != 0) {
+		fprintf(stderr, "mutex init has failed\n");
+		return 1;
+	}
+
 	// Loop over the alignments in the bam file
 	while((read_op = sam_read1(input, header, alignment)) > 0) {
 		// Get a pointer to the sequence and the length of the sequence
@@ -102,19 +192,18 @@ int main(int argc, char* argv[]) {
 		// Filling the seq memory segment with the character sequence
 		bamseq_to_char(bamseq, seq, seqlength);
 
-		// Iterating over all the k-mers
-		for(int i = 0; i < n_kmers; i++) {
-
-			// Output to file if the k-mer is found within the sequence
-			if(strstr(seq, forward_kmers[i]) != NULL) {
-				write_op = sam_write1(output, header, alignment);
-			}
-
-			if(strstr(seq, reverse_kmers[i]) != NULL) {
-				write_op = sam_write1(output, header, alignment);
-			}
+		// Launching the threads
+		for(int i = 0; i < N_THREADS; i++) {
+			pthread_create(&threads[i], NULL, match_kmers, &thread_chunks[i]);
 		}
 
+		// Joining the threads
+		for(int i = 0; i < N_THREADS; i++) {
+			pthread_join(threads[i], NULL);
+		}
+
+		n_processed++;
+		if(n_processed % 100000 == 0) fprintf(stderr, "%lld reads processed\n", n_processed);
 	}
 
 	// Making sure that we reached the EOF
@@ -137,6 +226,8 @@ int main(int argc, char* argv[]) {
 
 	free(forward_kmers);
 	free(reverse_kmers);
+	free(all_kmers);
+	free(thread_chunks);
 
 	return 0;
 }
@@ -189,5 +280,22 @@ int revcomp(char *forward, char *reverse) {
 	reverse[KMER_LENGTH] = '\0';
 
 	return 0;
+}
+
+// A function that checks the match between a sequence and a set of k-mers using multi-threading
+void *match_kmers(void *input) {
+	kmer_data* chunk = (kmer_data*) input;
+	int write_op;
+	// Iterating over all the k-mers
+	for(int i = 0; i < chunk->n_kmers; i++) {
+
+		// Output to file if the k-mer is found within the sequence
+		if(strstr(chunk->seq, chunk->kmers[i]) != NULL) {
+			pthread_mutex_lock(&lock);
+			write_op = sam_write1(chunk->output, chunk->header, chunk->alignment);
+			pthread_mutex_unlock(&lock);
+		}
+	}
+
 }
 
