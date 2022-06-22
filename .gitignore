@@ -1,3 +1,3 @@
 *.sam
 extract_kmers
-kmer_list.txt
+kmer*.txt

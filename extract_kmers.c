@@ -8,13 +8,16 @@
 #include "sam.h"
 
 // The amount of memory allocated for the read sequence
-#define READ_ALLOC 500
+#define READ_ALLOC 300
 
 // The length of the k-mers
 #define KMER_LENGTH 31
 
 // The maximum number of k-mers that the program can process
 #define MAX_KMERS 5000
+
+// The maximum number of records that can be recorded in the buffer at one time
+#define N_RECORDS 1000000
 
 // The number of threads that the program can use
 #define N_THREADS 5
@@ -37,19 +40,19 @@ char nt_table[16] = {'*', 'A', 'C', '*',
 // n_kmers: the number of k-mers to process on this thread
 // output: a pointer to the output SAM file where the results are written
 // header: a pointer to the header of the input BAM file
-// alignment: a pointer to the alignment record being processed
-// seq: a pointer to the character array containing the nucleotide sequence of the read
+// bambuffer: a pointer to the buffer of alignment records
+// seq: a pointer to an array of character strings containing the nucleotide sequence of the reads in the buffer
 typedef struct kmer_data {
 	// Constant members to be set before traversing the file
 	char **kmers;
 	int n_kmers;
 	samFile *output;
 	sam_hdr_t *header;
+	bam1_t **bambuffer;
+	char **seq;
 
-	// Members that must be update for each record in the file
-	bam1_t *alignment;
-	char *seq;
-
+	// Member that must be updated each time the buffer is read
+	int n_records;
 } kmer_data;
 
 // A global lock used to prevent threads from writing to the output file simultaneously
@@ -70,6 +73,9 @@ int revcomp(char *forward, char *reverse);
 // A function that allows matching sequence and k-mers with multithreading
 void *match_kmers(void *input);
 
+// A function that fills a buffer with bam records and returns the number of records read
+int fillbuf(bam1_t **buffer, samFile *bamfile, sam_hdr_t *header, int max_read);
+
 int main(int argc, char* argv[]) {
 
 	// Checking the input
@@ -88,7 +94,7 @@ int main(int argc, char* argv[]) {
 	long long int n_processed = 0;
 	int32_t seqlength;
 	uint8_t *bamseq = NULL;
-	char *seq = (char*) malloc(READ_ALLOC * sizeof(char));
+	char **seq = (char**) malloc(N_RECORDS * sizeof(char*));
 
 	// Declaring an array containing the data processed by each thread
 	kmer_data *thread_chunks;
@@ -104,7 +110,18 @@ int main(int argc, char* argv[]) {
 	header = sam_hdr_read(input);
 	assert(header != NULL);
 
-	bam1_t *alignment = bam_init1();
+        // Initializing a buffer to store several alignment records
+        bam1_t **bambuffer = (bam1_t**) malloc(N_RECORDS * sizeof(bam1_t*));
+
+        for(int i = 0; i < N_RECORDS; i++) {
+                bambuffer[i] = bam_init1();
+        }
+	
+	// Also initializing a buffer containing string sequences of the reads
+        for(int i = 0; i < N_RECORDS; i++) {
+                seq[i] = (char*) malloc(READ_ALLOC * sizeof(char));
+        }
+	
 
 	// Declaring the array of threads
 	pthread_t *threads = NULL;
@@ -159,7 +176,7 @@ int main(int argc, char* argv[]) {
 		thread_chunks[i].n_kmers = kmers_per_chunk;
 		thread_chunks[i].output = output;
 		thread_chunks[i].header = header;
-		thread_chunks[i].alignment = alignment;
+		thread_chunks[i].bambuffer = bambuffer;
 		thread_chunks[i].seq = seq;
 	}
 
@@ -184,13 +201,22 @@ int main(int argc, char* argv[]) {
 	}
 
 	// Loop over the alignments in the bam file
-	while((read_op = sam_read1(input, header, alignment)) > 0) {
-		// Get a pointer to the sequence and the length of the sequence
-		bamseq = bam_get_seq(alignment);
-		seqlength = alignment->core.l_qseq;
+        while((read_op = fillbuf(bambuffer, input, header, N_RECORDS)) > 0) {
 
-		// Filling the seq memory segment with the character sequence
-		bamseq_to_char(bamseq, seq, seqlength);
+		// We need to prepare the seq array so that the threads can use it
+		for(int i = 0; i < read_op; i++) {
+			// Get a pointer to the sequence and the length of the sequence
+			bamseq = bam_get_seq(bambuffer[i]);
+			seqlength = bambuffer[i]->core.l_qseq;
+
+			// Filling the seq memory segment with the character sequence
+			bamseq_to_char(bamseq, seq[i], seqlength);
+		}
+
+		// Setting the number of records for all chunks
+		for(int i = 0; i < N_THREADS; i++) {
+			thread_chunks[i].n_records = read_op;	
+		}
 
 		// Launching the threads
 		for(int i = 0; i < N_THREADS; i++) {
@@ -202,7 +228,7 @@ int main(int argc, char* argv[]) {
 			pthread_join(threads[i], NULL);
 		}
 
-		n_processed++;
+		n_processed += read_op;
 		if(n_processed % 100000 == 0) fprintf(stderr, "%lld reads processed\n", n_processed);
 	}
 
@@ -215,9 +241,11 @@ int main(int argc, char* argv[]) {
 	fclose(kmer_list);
 
 	sam_hdr_destroy(header);
-	bam_destroy1(alignment);
 
-	free(seq);
+	for(int i = 0; i < N_RECORDS; i++) {
+		bam_destroy1(bambuffer[i]);
+		free(seq[i]);
+	}
 
 	for(int i = 0; i < n_kmers; i++) {
 		free(forward_kmers[i]);
@@ -286,16 +314,36 @@ int revcomp(char *forward, char *reverse) {
 void *match_kmers(void *input) {
 	kmer_data* chunk = (kmer_data*) input;
 	int write_op;
-	// Iterating over all the k-mers
-	for(int i = 0; i < chunk->n_kmers; i++) {
 
-		// Output to file if the k-mer is found within the sequence
-		if(strstr(chunk->seq, chunk->kmers[i]) != NULL) {
-			pthread_mutex_lock(&lock);
-			write_op = sam_write1(chunk->output, chunk->header, chunk->alignment);
-			pthread_mutex_unlock(&lock);
+	// Iterating over all the records
+	for(int i = 0; i < chunk->n_records; i++) {
+
+		// Iterating over all the k-mers
+		for(int j = 0; j < chunk->n_kmers; j++) {
+
+			// Output to file if the k-mer is found within the sequence
+			if(strstr(chunk->seq[i], chunk->kmers[j]) != NULL) {
+				pthread_mutex_lock(&lock);
+				write_op = sam_write1(chunk->output, chunk->header, chunk->bambuffer[i]);
+				pthread_mutex_unlock(&lock);
+			}
 		}
 	}
+}
 
+// A function that fills a buffer with bam records and returns the number of records read
+int fillbuf(bam1_t **buffer, samFile *bamfile, sam_hdr_t *header, int max_read) {
+        int read_op;
+        int n_read = 0;
+
+        while(n_read < max_read && ((read_op = sam_read1(bamfile, header, buffer[n_read])) > 0)) {
+                n_read++;
+        }
+
+        if(n_read > 0) {
+                return n_read;
+        } else {
+                return -1;
+        }
 }
 
