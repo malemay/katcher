@@ -59,6 +59,13 @@ typedef struct buffer_data {
 	int n_read; // The number of records that were read
 } buffer_data;
 
+// A struct that holds the data for copying the records from the temporary buffer to the main buffer
+typedef struct copy_data {
+	bam1_t **tmpbuf; // A pointer to the temporary buffer
+	bam1_t **bambuf; // A pointer to the main buffer that is being processed
+	int n_records; // The number of records that this thread must process
+} copy_data;
+
 // A global lock used to prevent threads from writing to the output file simultaneously
 pthread_mutex_t lock;
 
@@ -81,7 +88,7 @@ void *match_kmers(void *input);
 void *fillbuf(void* input);
 
 // A function that copies alignments from the temporary buffer to the main one
-void copy_buf(bam1_t **bambuf, bam1_t **tmpbuf, int n_records);
+void *copy_buf(void *input);
 
 int main(int argc, char* argv[]) {
 
@@ -105,8 +112,10 @@ int main(int argc, char* argv[]) {
 
 	// Declaring an array containing the data processed by each thread
 	thread_data *thread_chunks;
-	// And a struct containing the data for the decompression thread
+	// A struct containing the data for the decompression thread
 	buffer_data bufdata;
+	// Another array containing structs with data for the copying threads
+	copy_data *copy_chunks;
 
 	// Declaring the array of threads and a thread for decompressing the file
 	pthread_t *threads = NULL, bufthread;
@@ -197,7 +206,9 @@ int main(int argc, char* argv[]) {
 	assert(BUFSIZE % N_THREADS == 0);
 
 	// Creating an array of thread_data structs with as many elements as there are threads
+	// The copy chunks which are meant for copying the data from tmpbuf to bambuf wiht multithreading are also processed here
 	thread_chunks = (thread_data*) malloc(N_THREADS * sizeof(thread_data));
+	copy_chunks = (copy_data*) malloc(N_THREADS * sizeof(copy_data));
 	records_per_thread = BUFSIZE / N_THREADS;
 
 	// Initializing the chunk elements
@@ -209,6 +220,10 @@ int main(int argc, char* argv[]) {
 		thread_chunks[i].bambuf = bambuf + i * records_per_thread;
 		thread_chunks[i].seq = seq + i * records_per_thread;
 		thread_chunks[i].n_records = records_per_thread; // this value might change after filling the buffer
+
+		copy_chunks[i].tmpbuf = tmpbuf + i * records_per_thread;
+		copy_chunks[i].bambuf = bambuf + i * records_per_thread;
+		copy_chunks[i].n_records = records_per_thread; // we won't care about adjusting this at the end of file for now
 	}
 
 	/* DEBUG
@@ -246,7 +261,15 @@ int main(int argc, char* argv[]) {
         while(n_read > 0) {
 
 		// Copying data from the temporary buffer to the one used for analysis
-		copy_buf(bambuf, tmpbuf, n_read);
+		// With multithreading
+		for(int i = 0; i < N_THREADS; i++) {
+			pthread_create(&threads[i], NULL, copy_buf, &copy_chunks[i]);
+		}
+
+		// Joining the copying threads before going any further
+		for(int i = 0; i < N_THREADS; i++) {
+			pthread_join(threads[i], NULL);
+		}
 
 		// We no longer need the data in tmpbuf so we can launch the decompression thread
 		pthread_create(&bufthread, NULL, fillbuf, &bufdata);
@@ -427,10 +450,11 @@ void *fillbuf(void* input) {
 }
 
 // A function that copies alignment records from the temporary buffer to the main one
-void copy_buf(bam1_t **bambuf, bam1_t **tmpbuf, int n_records) {
+void *copy_buf(void *input) {
+	copy_data *data = (copy_data*) input;
 	bam1_t *result;
-	for(int i = 0; i < n_records; i++) {
-		result = bam_copy1(bambuf[i], tmpbuf[i]);
+	for(int i = 0; i < data->n_records; i++) {
+		result = bam_copy1(data->bambuf[i], data->tmpbuf[i]);
 	}
 }
 
