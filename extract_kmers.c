@@ -63,6 +63,7 @@ typedef struct buffer_data {
 typedef struct copy_data {
 	bam1_t **tmpbuf; // A pointer to the temporary buffer
 	bam1_t **bambuf; // A pointer to the main buffer that is being processed
+	char **seq; // The character sequences of the reads associated with bambuf
 	int n_records; // The number of records that this thread must process
 } copy_data;
 
@@ -106,8 +107,6 @@ int main(int argc, char* argv[]) {
 	// Declaring simple variables
 	int n_read, records_per_thread, executing_threads, n_kmers = 0, khash_return;
 	long long int n_processed = 0;
-	int32_t seqlength;
-	uint8_t *bamseq = NULL;
 	char **seq = (char**) malloc(BUFSIZE * sizeof(char*));
 
 	// Declaring an array containing the data processed by each thread
@@ -223,6 +222,7 @@ int main(int argc, char* argv[]) {
 
 		copy_chunks[i].tmpbuf = tmpbuf + i * records_per_thread;
 		copy_chunks[i].bambuf = bambuf + i * records_per_thread;
+		copy_chunks[i].seq = seq + i * records_per_thread;
 		copy_chunks[i].n_records = records_per_thread; // we won't care about adjusting this at the end of file for now
 	}
 
@@ -261,6 +261,7 @@ int main(int argc, char* argv[]) {
         while(n_read > 0) {
 
 		// Copying data from the temporary buffer to the one used for analysis
+		// This function also prepares the sequence data in char **seq
 		// With multithreading
 		for(int i = 0; i < N_THREADS; i++) {
 			pthread_create(&threads[i], NULL, copy_buf, &copy_chunks[i]);
@@ -273,16 +274,6 @@ int main(int argc, char* argv[]) {
 
 		// We no longer need the data in tmpbuf so we can launch the decompression thread
 		pthread_create(&bufthread, NULL, fillbuf, &bufdata);
-
-		// We need to prepare the seq array so that the threads can use it
-		for(int i = 0; i < n_read; i++) {
-			// Get a pointer to the sequence and the length of the sequence
-			bamseq = bam_get_seq(bambuf[i]);
-			seqlength = bambuf[i]->core.l_qseq;
-
-			// Filling the seq memory segment with the character sequence
-			bamseq_to_char(bamseq, seq[i], seqlength);
-		}
 
 		// If we filled the buffer then the number of executing threads is N_THREADS
 		if(n_read == BUFSIZE) {
@@ -453,8 +444,18 @@ void *fillbuf(void* input) {
 void *copy_buf(void *input) {
 	copy_data *data = (copy_data*) input;
 	bam1_t *result;
+	uint8_t *bamseq = NULL;
+	int32_t seqlength;
+
 	for(int i = 0; i < data->n_records; i++) {
 		result = bam_copy1(data->bambuf[i], data->tmpbuf[i]);
+
+		// Also preparing the seq array by converting the native bam format to a character string
+		bamseq = bam_get_seq(data->bambuf[i]); // Pointer to the start of the sequence
+		seqlength = data->bambuf[i]->core.l_qseq; // Length of the sequence
+
+		// Filling the seq memory segment with the character sequence
+		bamseq_to_char(bamseq, data->seq[i], seqlength);
 	}
 }
 
