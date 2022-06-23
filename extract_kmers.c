@@ -18,7 +18,7 @@
 #define MAX_KMERS 100000
 
 // The maximum number of records that can be recorded in the buffer at one time
-#define N_RECORDS 1000000
+#define BUFSIZE 1000000
 
 // The number of threads that the program can use
 #define N_THREADS 5
@@ -45,10 +45,19 @@ typedef struct thread_data {
 	khint_t hash_end; // the end of the hash table ; will not change after the table has been computed
 	samFile *output; // Pointer to the sam output file
 	sam_hdr_t *header; // Pointer to the header
-	bam1_t **bambuffer; // Pointer to the buffered records being processed
+	bam1_t **bambuf; // Pointer to the buffered records being processed
 	int n_records; // the number of records that will be processed by this thread
 	char **seq; // Pointer to the sequence being queried
 } thread_data;
+
+// A struct that holds the data for the decompression thread (the one that reads the bam file into memory)
+typedef struct buffer_data {
+	samFile *bamfile; // Pointer to the bam file that is being read from
+	sam_hdr_t *header; // The header of the bam file being read
+	bam1_t **tmpbuf; // The temporary buffer from which data will be copied to the main buffer
+	int max_read; // The maximum number of records to read from the file
+	int n_read; // The number of records that were read
+} buffer_data;
 
 // A global lock used to prevent threads from writing to the output file simultaneously
 pthread_mutex_t lock;
@@ -68,8 +77,11 @@ int revcomp(char *forward, char *reverse);
 // A function that allows matching read sequence and k-mers with multithreading
 void *match_kmers(void *input);
 
-// A function that fills a buffer with bam records and returns the number of records read
-int fillbuf(bam1_t **buffer, samFile *bamfile, sam_hdr_t *header, int max_read);
+// A function that fills a temporary buffer with bam records
+void *fillbuf(void* input);
+
+// A function that copies alignments from the temporary buffer to the main one
+void copy_buf(bam1_t **bambuf, bam1_t **tmpbuf, int n_records);
 
 int main(int argc, char* argv[]) {
 
@@ -85,17 +97,19 @@ int main(int argc, char* argv[]) {
 	char **forward_kmers, **reverse_kmers, **all_kmers;
 
 	// Declaring simple variables
-	int write_op, read_op, records_per_thread, executing_threads, n_kmers = 0, khash_return;
+	int n_read, records_per_thread, executing_threads, n_kmers = 0, khash_return;
 	long long int n_processed = 0;
 	int32_t seqlength;
 	uint8_t *bamseq = NULL;
-	char **seq = (char**) malloc(N_RECORDS * sizeof(char*));
+	char **seq = (char**) malloc(BUFSIZE * sizeof(char*));
 
 	// Declaring an array containing the data processed by each thread
 	thread_data *thread_chunks;
+	// And a struct containing the data for the decompression thread
+	buffer_data bufdata;
 
-	// Declaring the array of threads
-	pthread_t *threads = NULL;
+	// Declaring the array of threads and a thread for decompressing the file
+	pthread_t *threads = NULL, bufthread;
 
 	// Declaring and initializing the hash table that will store the hashed values of the kmers, and its end iterator hash_end
 	khash_t(kmer_hash) *kmer_table;
@@ -113,17 +127,16 @@ int main(int argc, char* argv[]) {
 	header = sam_hdr_read(input);
 	assert(header != NULL);
 
-        // Initializing a buffer to store several alignment records
-        bam1_t **bambuffer = (bam1_t**) malloc(N_RECORDS * sizeof(bam1_t*));
+        // Initializing buffers to store several alignment records
+        bam1_t **bambuf = (bam1_t**) malloc(BUFSIZE * sizeof(bam1_t*));
+        bam1_t **tmpbuf = (bam1_t**) malloc(BUFSIZE * sizeof(bam1_t*));
 
-        for(int i = 0; i < N_RECORDS; i++) {
-                bambuffer[i] = bam_init1();
-        }
-	
-	// Also initializing a buffer containing string sequences of the reads
-        for(int i = 0; i < N_RECORDS; i++) {
+        for(int i = 0; i < BUFSIZE; i++) {
+                bambuf[i] = bam_init1();
+                tmpbuf[i] = bam_init1();
                 seq[i] = (char*) malloc(READ_ALLOC * sizeof(char));
         }
+	
 
 	// Allocating memory for the k-mer arrays and reading the k-mers from file
 	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
@@ -181,11 +194,11 @@ int main(int argc, char* argv[]) {
 	DEBUG */
 
 	// Setting the data for multithreading
-	assert(N_RECORDS % N_THREADS == 0);
+	assert(BUFSIZE % N_THREADS == 0);
 
 	// Creating an array of thread_data structs with as many elements as there are threads
 	thread_chunks = (thread_data*) malloc(N_THREADS * sizeof(thread_data));
-	records_per_thread = N_RECORDS / N_THREADS;
+	records_per_thread = BUFSIZE / N_THREADS;
 
 	// Initializing the chunk elements
 	for(int i = 0; i < N_THREADS; i++) {
@@ -193,7 +206,7 @@ int main(int argc, char* argv[]) {
 		thread_chunks[i].hash_end = hash_end;
 		thread_chunks[i].output = output;
 		thread_chunks[i].header = header;
-		thread_chunks[i].bambuffer = bambuffer + i * records_per_thread;
+		thread_chunks[i].bambuf = bambuf + i * records_per_thread;
 		thread_chunks[i].seq = seq + i * records_per_thread;
 		thread_chunks[i].n_records = records_per_thread; // this value might change after filling the buffer
 	}
@@ -218,36 +231,53 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 
+	// Filling the temporary buffer by preparing the data and running the associated thread
+	bufdata.bamfile = input;
+	bufdata.header = header;
+	bufdata.tmpbuf = tmpbuf;
+	bufdata.max_read = BUFSIZE; // The maximum number of records to read from the file
+
+	pthread_create(&bufthread, NULL, fillbuf, &bufdata);
+	pthread_join(bufthread, NULL);
+
+	n_read = bufdata.n_read;
+
 	// Loop over the alignments in the bam file
-        while((read_op = fillbuf(bambuffer, input, header, N_RECORDS)) > 0) {
+        while(n_read > 0) {
+
+		// Copying data from the temporary buffer to the one used for analysis
+		copy_buf(bambuf, tmpbuf, n_read);
+
+		// We no longer need the data in tmpbuf so we can launch the decompression thread
+		pthread_create(&bufthread, NULL, fillbuf, &bufdata);
 
 		// We need to prepare the seq array so that the threads can use it
-		for(int i = 0; i < read_op; i++) {
+		for(int i = 0; i < n_read; i++) {
 			// Get a pointer to the sequence and the length of the sequence
-			bamseq = bam_get_seq(bambuffer[i]);
-			seqlength = bambuffer[i]->core.l_qseq;
+			bamseq = bam_get_seq(bambuf[i]);
+			seqlength = bambuf[i]->core.l_qseq;
 
 			// Filling the seq memory segment with the character sequence
 			bamseq_to_char(bamseq, seq[i], seqlength);
 		}
 
 		// If we filled the buffer then the number of executing threads is N_THREADS
-		if(read_op == N_RECORDS) {
+		if(n_read == BUFSIZE) {
 			executing_threads = N_THREADS;
 		} else {
 			// Otherwise there will be a certain number of threads that process
 			// the usual number of records, and the last thread will process
 			// the remaining records
-			if(read_op % records_per_thread == 0) {
-				executing_threads = read_op / records_per_thread;
+			if(n_read % records_per_thread == 0) {
+				executing_threads = n_read / records_per_thread;
 			} else {
-				executing_threads = read_op / records_per_thread + 1;
+				executing_threads = n_read / records_per_thread + 1;
 			}
 
 			fprintf(stderr, "Buffer did not fill completely.");
 			fprintf(stderr, "Rest of file will be processed by %d threads processing %d records each and one thread processing %d records.\n",
-					executing_threads - 1, records_per_thread, (read_op - (executing_threads - 1) * records_per_thread));
-			thread_chunks[executing_threads - 1].n_records = (read_op - (executing_threads - 1) * records_per_thread);
+					executing_threads - 1, records_per_thread, (n_read - (executing_threads - 1) * records_per_thread));
+			thread_chunks[executing_threads - 1].n_records = (n_read - (executing_threads - 1) * records_per_thread);
 		}
 
 		// Launching the threads
@@ -260,13 +290,14 @@ int main(int argc, char* argv[]) {
 			pthread_join(threads[i], NULL);
 		}
 
-		n_processed += read_op;
+		n_processed += n_read;
 		if(n_processed % 1000000 == 0) fprintf(stderr, "%lld reads processed using %d threads\n", n_processed, executing_threads);
+
+		// We wait for the buffer to be filled before starting the loop again
+		pthread_join(bufthread, NULL);
+		n_read = bufdata.n_read;
 	}
 
-	// Making sure that we reached the EOF
-	assert(read_op == -1);
-	
 	// Freeing the file handles and memory allocated
 	sam_close(input);
 	sam_close(output);
@@ -274,8 +305,9 @@ int main(int argc, char* argv[]) {
 
 	sam_hdr_destroy(header);
 
-	for(int i = 0; i < N_RECORDS; i++) {
-		bam_destroy1(bambuffer[i]);
+	for(int i = 0; i < BUFSIZE; i++) {
+		bam_destroy1(bambuf[i]);
+		bam_destroy1(tmpbuf[i]);
 		free(seq[i]);
 	}
 
@@ -368,7 +400,7 @@ void *match_kmers(void *input) {
 			// Checking if the k-mer until the end of the read is found in the k-mer hash table
 			if(kh_get(kmer_hash, chunk->kmer_table, j - KMER_LENGTH + 1) != chunk->hash_end) {
 				pthread_mutex_lock(&lock);
-				write_op = sam_write1(chunk->output, chunk->header, chunk->bambuffer[i]);
+				write_op = sam_write1(chunk->output, chunk->header, chunk->bambuf[i]);
 				pthread_mutex_unlock(&lock);
 			}
 
@@ -378,19 +410,27 @@ void *match_kmers(void *input) {
 	}
 }
 
-// A function that fills a buffer with bam records and returns the number of records read
-int fillbuf(bam1_t **buffer, samFile *bamfile, sam_hdr_t *header, int max_read) {
+// A function that fills a buffer with bam records and counts the number of records that were read
+// This function is set such that it can be run as an independent thread that will decompress
+// the input while the records that have already being read are being processed
+void *fillbuf(void* input) {
+	buffer_data *data = (buffer_data*) input;
         int read_op;
-        int n_read = 0;
 
-        while(n_read < max_read && ((read_op = sam_read1(bamfile, header, buffer[n_read])) > 0)) {
-                n_read++;
-        }
+	// Resetting the number of records read
+        data->n_read = 0;
 
-        if(n_read > 0) {
-                return n_read;
-        } else {
-                return -1;
+	// Reading the records
+        while(data->n_read < data->max_read && (read_op = sam_read1(data->bamfile, data->header, data->tmpbuf[data->n_read])) > 0) {
+                data->n_read++;
         }
+}
+
+// A function that copies alignment records from the temporary buffer to the main one
+void copy_buf(bam1_t **bambuf, bam1_t **tmpbuf, int n_records) {
+	bam1_t *result;
+	for(int i = 0; i < n_records; i++) {
+		result = bam_copy1(bambuf[i], tmpbuf[i]);
+	}
 }
 
