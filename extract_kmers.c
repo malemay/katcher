@@ -15,7 +15,7 @@
 #define KMER_LENGTH 31
 
 // The maximum number of k-mers that the program can process
-#define MAX_KMERS 5000
+#define MAX_KMERS 100000
 
 // The maximum number of records that can be recorded in the buffer at one time
 #define N_RECORDS 1000000
@@ -40,24 +40,15 @@ char nt_table[16] = {'*', 'A', 'C', '*',
                     '*', '*', '*', 'N'};
 
 // A struct that holds the data required for a single thread to execute
-// kmers: a pointer to the first k-mer associated with this thread
-// n_kmers: the number of k-mers to process on this thread
-// output: a pointer to the output SAM file where the results are written
-// header: a pointer to the header of the input BAM file
-// bambuffer: a pointer to the buffer of alignment records
-// seq: a pointer to an array of character strings containing the nucleotide sequence of the reads in the buffer
-typedef struct kmer_data {
-	// Constant members to be set before traversing the file
-	char **kmers;
-	int n_kmers;
-	samFile *output;
-	sam_hdr_t *header;
-	bam1_t **bambuffer;
-	char **seq;
-
-	// Member that must be updated each time the buffer is read
-	int n_records;
-} kmer_data;
+typedef struct thread_data {
+	khash_t(kmer_hash) *kmer_table; // Pointer to the hash table containing the k-mers
+	khint_t hash_end; // the end of the hash table ; will not change after the table has been computed
+	samFile *output; // Pointer to the sam output file
+	sam_hdr_t *header; // Pointer to the header
+	bam1_t **bambuffer; // Pointer to the buffered records being processed
+	int n_records; // the number of records that will be processed by this thread
+	char **seq; // Pointer to the sequence being queried
+} thread_data;
 
 // A global lock used to prevent threads from writing to the output file simultaneously
 pthread_mutex_t lock;
@@ -74,7 +65,7 @@ void bamseq_to_char(uint8_t *bamseq, char *seq, int seqlength);
 // reverse: a pointer to an array of characters that will hold the reverse k-mer (must be sufficiently large)
 int revcomp(char *forward, char *reverse);
 
-// A function that allows matching sequence and k-mers with multithreading
+// A function that allows matching read sequence and k-mers with multithreading
 void *match_kmers(void *input);
 
 // A function that fills a buffer with bam records and returns the number of records read
@@ -83,10 +74,10 @@ int fillbuf(bam1_t **buffer, samFile *bamfile, sam_hdr_t *header, int max_read);
 int main(int argc, char* argv[]) {
 
 	// Checking the input
-	//if(argc != 3) {
-	//	fprintf(stderr, "Usage: %s <in.bam> <kmer_list.txt> > out.sam\n", argv[0]);
-//		return 1;
-//	}
+	if(argc != 3) {
+		fprintf(stderr, "Usage: %s <in.bam> <kmer_list.txt> > out.sam\n", argv[0]);
+		return 1;
+	}
 
 	// Processing the command-line arguments
 	char *input_file = argv[1];
@@ -94,19 +85,22 @@ int main(int argc, char* argv[]) {
 	char **forward_kmers, **reverse_kmers, **all_kmers;
 
 	// Declaring simple variables
-	int write_op, read_op, n_chunks, kmers_per_chunk, n_kmers = 0, khash_return;
+	int write_op, read_op, records_per_thread, executing_threads, n_kmers = 0, khash_return;
 	long long int n_processed = 0;
 	int32_t seqlength;
 	uint8_t *bamseq = NULL;
 	char **seq = (char**) malloc(N_RECORDS * sizeof(char*));
 
 	// Declaring an array containing the data processed by each thread
-	kmer_data *thread_chunks;
+	thread_data *thread_chunks;
 
-	// Declaring and initializing the hash table that will store the hashed values of the kmers, and its iterator k
+	// Declaring the array of threads
+	pthread_t *threads = NULL;
+
+	// Declaring and initializing the hash table that will store the hashed values of the kmers, and its end iterator hash_end
 	khash_t(kmer_hash) *kmer_table;
 	kmer_table = kh_init(kmer_hash);
-	khint_t k;
+	khint_t hash_end;
 
 	// Declaring and initializing htslib-related variables
 	samFile *input = sam_open(input_file, "r");
@@ -130,10 +124,6 @@ int main(int argc, char* argv[]) {
         for(int i = 0; i < N_RECORDS; i++) {
                 seq[i] = (char*) malloc(READ_ALLOC * sizeof(char));
         }
-	
-
-	// Declaring the array of threads
-	pthread_t *threads = NULL;
 
 	// Allocating memory for the k-mer arrays and reading the k-mers from file
 	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
@@ -157,9 +147,6 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "Generated reverse-complemented sequence %s for: %s\n", reverse_kmers[i], forward_kmers[i]);
 	}
 
-	// Setting the data for multithreading
-	assert((n_kmers * 2) % N_THREADS == 0);
-
 	// Creating a common array with both forward and reverse k-mers together
 	all_kmers = (char**) malloc(n_kmers * 2 * sizeof(char*));
 
@@ -173,7 +160,10 @@ int main(int argc, char* argv[]) {
 		kh_put(kmer_hash, kmer_table, all_kmers[i], &khash_return);
 	}
 
-	// DEBUG to test the hash table
+	// Getting the end position of the hash table
+	hash_end = kh_end(kmer_table);
+
+	/* DEBUG to test the hash table
 	// The string to check is the third argument on the command line
 	if(kh_get(kmer_hash, kmer_table, argv[3]) == kh_end(kmer_table)) {
 		fprintf(stderr, "k-mer sequence %s is not in k-mer hash table\n", argv[3]);
@@ -182,7 +172,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	return 0;
-	// DEBUG
+	 DEBUG */
 
 	/* DEBUG
 	for(int i = 0; i < (n_kmers * 2); i++) {
@@ -190,19 +180,22 @@ int main(int argc, char* argv[]) {
 	}
 	DEBUG */
 
-	// Creating an array of kmer_data structs with as many elements as there are threads
-	kmers_per_chunk = (n_kmers * 2) / N_THREADS;
-	n_chunks = (n_kmers * 2) / kmers_per_chunk;
-	thread_chunks = (kmer_data*) malloc(n_chunks * sizeof(kmer_data));
+	// Setting the data for multithreading
+	assert(N_RECORDS % N_THREADS == 0);
+
+	// Creating an array of thread_data structs with as many elements as there are threads
+	thread_chunks = (thread_data*) malloc(N_THREADS * sizeof(thread_data));
+	records_per_thread = N_RECORDS / N_THREADS;
 
 	// Initializing the chunk elements
-	for(int i = 0; i < n_chunks; i++) {
-		thread_chunks[i].kmers = all_kmers + i * kmers_per_chunk;
-		thread_chunks[i].n_kmers = kmers_per_chunk;
+	for(int i = 0; i < N_THREADS; i++) {
+		thread_chunks[i].kmer_table = kmer_table;
+		thread_chunks[i].hash_end = hash_end;
 		thread_chunks[i].output = output;
 		thread_chunks[i].header = header;
-		thread_chunks[i].bambuffer = bambuffer;
-		thread_chunks[i].seq = seq;
+		thread_chunks[i].bambuffer = bambuffer + i * records_per_thread;
+		thread_chunks[i].seq = seq + i * records_per_thread;
+		thread_chunks[i].n_records = records_per_thread; // this value might change after filling the buffer
 	}
 
 	/* DEBUG
@@ -238,23 +231,37 @@ int main(int argc, char* argv[]) {
 			bamseq_to_char(bamseq, seq[i], seqlength);
 		}
 
-		// Setting the number of records for all chunks
-		for(int i = 0; i < N_THREADS; i++) {
-			thread_chunks[i].n_records = read_op;	
+		// If we filled the buffer then the number of executing threads is N_THREADS
+		if(read_op == N_RECORDS) {
+			executing_threads = N_THREADS;
+		} else {
+			// Otherwise there will be a certain number of threads that process
+			// the usual number of records, and the last thread will process
+			// the remaining records
+			if(read_op % records_per_thread == 0) {
+				executing_threads = read_op / records_per_thread;
+			} else {
+				executing_threads = read_op / records_per_thread + 1;
+			}
+
+			fprintf(stderr, "Buffer did not fill completely.");
+			fprintf(stderr, "Rest of file will be processed by %d threads processing %d records each and one thread processing %d records.\n",
+					executing_threads - 1, records_per_thread, (read_op - (executing_threads - 1) * records_per_thread));
+			thread_chunks[executing_threads - 1].n_records = (read_op - (executing_threads - 1) * records_per_thread);
 		}
 
 		// Launching the threads
-		for(int i = 0; i < N_THREADS; i++) {
+		for(int i = 0; i < executing_threads; i++) {
 			pthread_create(&threads[i], NULL, match_kmers, &thread_chunks[i]);
 		}
 
 		// Joining the threads
-		for(int i = 0; i < N_THREADS; i++) {
+		for(int i = 0; i < executing_threads; i++) {
 			pthread_join(threads[i], NULL);
 		}
 
 		n_processed += read_op;
-		if(n_processed % 100000 == 0) fprintf(stderr, "%lld reads processed\n", n_processed);
+		if(n_processed % 1000000 == 0) fprintf(stderr, "%lld reads processed using %d threads\n", n_processed, executing_threads);
 	}
 
 	// Making sure that we reached the EOF
@@ -281,6 +288,8 @@ int main(int argc, char* argv[]) {
 	free(reverse_kmers);
 	free(all_kmers);
 	free(thread_chunks);
+
+	kh_destroy(kmer_hash, kmer_table);
 
 	return 0;
 }
@@ -335,23 +344,36 @@ int revcomp(char *forward, char *reverse) {
 	return 0;
 }
 
-// A function that checks the match between a sequence and a set of k-mers using multi-threading
+// A function that checks whether the k-mers in a given read are found in the k-mer hash table
+// This function is set for multithreading
+// CAUTION: this function modifies the seq char** by setting the last character to a \0 character until the whole
+// read was processed. This is OK in the current implementation because each record is accessed only by one thread
+// However, this should be taken into account if the implementation were to change
 void *match_kmers(void *input) {
-	kmer_data* chunk = (kmer_data*) input;
-	int write_op;
+	thread_data* chunk = (thread_data*) input;
+	int write_op, seqlength;
+	char *j, *seqstart;
 
 	// Iterating over all the records
 	for(int i = 0; i < chunk->n_records; i++) {
 
-		// Iterating over all the k-mers
-		for(int j = 0; j < chunk->n_kmers; j++) {
+		// Getting the length of the read and a pointer to its start
+		seqlength = strlen(chunk->seq[i]);
+		seqstart = chunk->seq[i];
 
-			// Output to file if the k-mer is found within the sequence
-			if(strstr(chunk->seq[i], chunk->kmers[j]) != NULL) {
+		// Iterating over all the k-mers in the read
+		// j is the last character of the read
+		for(j = seqstart + seqlength - 1; j > seqstart + KMER_LENGTH - 2; j--) {
+
+			// Checking if the k-mer until the end of the read is found in the k-mer hash table
+			if(kh_get(kmer_hash, chunk->kmer_table, j - KMER_LENGTH + 1) != chunk->hash_end) {
 				pthread_mutex_lock(&lock);
 				write_op = sam_write1(chunk->output, chunk->header, chunk->bambuffer[i]);
 				pthread_mutex_unlock(&lock);
 			}
+
+			// Setting the last character in the string to \0 so we can process the next k-mer
+			*j = '\0';
 		}
 	}
 }
