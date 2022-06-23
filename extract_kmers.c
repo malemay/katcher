@@ -91,6 +91,9 @@ void *fillbuf(void* input);
 // A function that copies alignments from the temporary buffer to the main one
 void *copy_buf(void *input);
 
+// A function meant for multithreading that generates a character string sequence from the bam representation
+void *prepare_seq(void *input);
+
 int main(int argc, char* argv[]) {
 
 	// Checking the input
@@ -261,7 +264,6 @@ int main(int argc, char* argv[]) {
         while(n_read > 0) {
 
 		// Copying data from the temporary buffer to the one used for analysis
-		// This function also prepares the sequence data in char **seq
 		// With multithreading
 		for(int i = 0; i < N_THREADS; i++) {
 			pthread_create(&threads[i], NULL, copy_buf, &copy_chunks[i]);
@@ -274,6 +276,17 @@ int main(int argc, char* argv[]) {
 
 		// We no longer need the data in tmpbuf so we can launch the decompression thread
 		pthread_create(&bufthread, NULL, fillbuf, &bufdata);
+
+		// Now we need to generate the character string representation of the sequences in the bam file
+		// This is multithreaded
+		for(int i = 0; i < N_THREADS; i++) {
+			pthread_create(&threads[i], NULL, prepare_seq, &copy_chunks[i]);
+		}
+
+		// Joining the copying threads before going any further
+		for(int i = 0; i < N_THREADS; i++) {
+			pthread_join(threads[i], NULL);
+		}
 
 		// If we filled the buffer then the number of executing threads is N_THREADS
 		if(n_read == BUFSIZE) {
@@ -444,12 +457,19 @@ void *fillbuf(void* input) {
 void *copy_buf(void *input) {
 	copy_data *data = (copy_data*) input;
 	bam1_t *result;
+
+	for(int i = 0; i < data->n_records; i++) {
+		result = bam_copy1(data->bambuf[i], data->tmpbuf[i]);
+	}
+}
+
+// A function meant for multithreading that generates a character string sequence from the bam representation
+void *prepare_seq(void *input) {
+	copy_data *data = (copy_data*) input;
 	uint8_t *bamseq = NULL;
 	int32_t seqlength;
 
 	for(int i = 0; i < data->n_records; i++) {
-		result = bam_copy1(data->bambuf[i], data->tmpbuf[i]);
-
 		// Also preparing the seq array by converting the native bam format to a character string
 		bamseq = bam_get_seq(data->bambuf[i]); // Pointer to the start of the sequence
 		seqlength = data->bambuf[i]->core.l_qseq; // Length of the sequence
