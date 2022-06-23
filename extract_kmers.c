@@ -6,6 +6,7 @@
 #include <pthread.h>
 
 #include "sam.h"
+#include "khash.h"
 
 // The amount of memory allocated for the read sequence
 #define READ_ALLOC 300
@@ -21,6 +22,9 @@
 
 // The number of threads that the program can use
 #define N_THREADS 5
+
+// Initializing a hash table type named "kmer_hash" using klib's khash functions
+KHASH_SET_INIT_STR(kmer_hash);
 
 // This program takes a bam file and a list of k-mers as input, and outputs all
 // reads containing these kmers or their reverse complement in SAM format
@@ -79,18 +83,18 @@ int fillbuf(bam1_t **buffer, samFile *bamfile, sam_hdr_t *header, int max_read);
 int main(int argc, char* argv[]) {
 
 	// Checking the input
-	if(argc != 3) {
-		fprintf(stderr, "Usage: %s <in.bam> <kmer_list.txt> > out.sam\n", argv[0]);
-		return 1;
-	}
+	//if(argc != 3) {
+	//	fprintf(stderr, "Usage: %s <in.bam> <kmer_list.txt> > out.sam\n", argv[0]);
+//		return 1;
+//	}
 
 	// Processing the command-line arguments
 	char *input_file = argv[1];
 	FILE *kmer_list = fopen(argv[2], "r");
-	char **forward_kmers, **reverse_kmers;
+	char **forward_kmers, **reverse_kmers, **all_kmers;
 
 	// Declaring simple variables
-	int write_op, read_op, n_chunks, kmers_per_chunk, n_kmers = 0;
+	int write_op, read_op, n_chunks, kmers_per_chunk, n_kmers = 0, khash_return;
 	long long int n_processed = 0;
 	int32_t seqlength;
 	uint8_t *bamseq = NULL;
@@ -98,6 +102,11 @@ int main(int argc, char* argv[]) {
 
 	// Declaring an array containing the data processed by each thread
 	kmer_data *thread_chunks;
+
+	// Declaring and initializing the hash table that will store the hashed values of the kmers, and its iterator k
+	khash_t(kmer_hash) *kmer_table;
+	kmer_table = kh_init(kmer_hash);
+	khint_t k;
 
 	// Declaring and initializing htslib-related variables
 	samFile *input = sam_open(input_file, "r");
@@ -152,12 +161,28 @@ int main(int argc, char* argv[]) {
 	assert((n_kmers * 2) % N_THREADS == 0);
 
 	// Creating a common array with both forward and reverse k-mers together
-	char **all_kmers = (char**) malloc(n_kmers * 2 * sizeof(char*));
+	all_kmers = (char**) malloc(n_kmers * 2 * sizeof(char*));
 
 	for(int i = 0; i < n_kmers; i++) {
 		all_kmers[i * 2] = forward_kmers[i];
 		all_kmers[i * 2 + 1] = reverse_kmers[i];
 	}
+
+	// Adding all k-mers to the hash table
+	for(int i = 0; i < (2 * n_kmers); i++) {
+		kh_put(kmer_hash, kmer_table, all_kmers[i], &khash_return);
+	}
+
+	// DEBUG to test the hash table
+	// The string to check is the third argument on the command line
+	if(kh_get(kmer_hash, kmer_table, argv[3]) == kh_end(kmer_table)) {
+		fprintf(stderr, "k-mer sequence %s is not in k-mer hash table\n", argv[3]);
+	} else {
+		fprintf(stderr, "k-mer sequence %s is in k-mer hash table\n", argv[3]);
+	}
+
+	return 0;
+	// DEBUG
 
 	/* DEBUG
 	for(int i = 0; i < (n_kmers * 2); i++) {
