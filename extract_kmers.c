@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <pthread.h>
+#include <getopt.h>
 
 #include "sam.h"
 #include "khash.h"
@@ -67,6 +68,13 @@ typedef struct copy_data {
 	int n_records; // The number of records that this thread must process
 } copy_data;
 
+// A struct that holds the parameters as read from the command line
+typedef struct params {
+	char* input_file; // the name of the input bam file
+	char* kmer_list; // the name of the file containing the list
+	char* output_file; // the name of the output sam file
+} params;
+
 // A global lock used to prevent threads from writing to the output file simultaneously
 pthread_mutex_t lock;
 
@@ -94,17 +102,17 @@ void *copy_buf(void *input);
 // A function meant for multithreading that generates a character string sequence from the bam representation
 void *prepare_seq(void *input);
 
+// A function to parse the command line arguments
+int parse_args(int argc, char* argv[], params *args);
+
 int main(int argc, char* argv[]) {
 
-	// Checking the input
-	if(argc != 3) {
-		fprintf(stderr, "Usage: %s <in.bam> <kmer_list.txt> > out.sam\n", argv[0]);
-		return 1;
-	}
+	// Parsing the command-line arguments
+	params args = {NULL, NULL, "-"};
+	if(parse_args(argc, argv, &args) != 0) return 1;
 
 	// Processing the command-line arguments
-	char *input_file = argv[1];
-	FILE *kmer_list = fopen(argv[2], "r");
+	FILE *kmer_list = fopen(args.kmer_list, "r");
 	char **forward_kmers, **reverse_kmers, **all_kmers;
 
 	// Declaring simple variables
@@ -128,10 +136,10 @@ int main(int argc, char* argv[]) {
 	khint_t hash_end;
 
 	// Declaring and initializing htslib-related variables
-	samFile *input = sam_open(input_file, "r");
+	samFile *input = sam_open(args.input_file, "r");
 	assert(input != NULL);
 
-	samFile *output = hts_open("-", "w");
+	samFile *output = hts_open(args.output_file, "w");
 	assert(output != NULL);
 
 	sam_hdr_t *header = sam_hdr_init();
@@ -477,5 +485,62 @@ void *prepare_seq(void *input) {
 		// Filling the seq memory segment with the character sequence
 		bamseq_to_char(bamseq, data->seq[i], seqlength);
 	}
+}
+
+int parse_args(int argc, char* argv[], params *args) {
+
+	int longindex;
+	char param;
+
+	char *help = "Usage: %s -i <input.bam> -k <kmer_list.txt>\n"
+		"\t-i, --input:  Input file in bam format (required)\n"
+		"\t-k, --kmers:  List of k-mers to look for in the reads (required)\n"
+		"\t-o, --output: Name of the output file in same format (default: stdout)\n"
+		"\t-h, --help:   Print this help message\n";
+
+	// Using getopt_long for parsing the arguments
+	struct option long_options[] = {
+		{"input",  required_argument, 0,  'i'},
+		{"kmers",  required_argument, 0,  'k'},
+		{"output", required_argument, 0,  'o'},
+		{"help",   no_argument,       0,  'h'},
+		{0,        0,                 0,   0 }
+	};
+
+	while((param = getopt_long(argc, argv, "i:k:o:h", long_options, &longindex)) != -1) {
+		switch(param) {
+			case 'i':
+				args->input_file = strdup(optarg);
+				break;
+			case 'k':
+				args->kmer_list = strdup(optarg);
+				break;
+			case 'o':
+				args->output_file = strdup(optarg);
+				break;
+			case 'h':
+			case '?':
+				fprintf(stderr, help, argv[0]);
+				return 1;
+				break;
+			default:
+				fprintf(stderr, "Unknown option, check usage by running %s --help", argv[0]);
+		}
+	}
+
+	// Checking that all the required parameters are present
+	if(args->input_file == NULL) {
+		fprintf(stderr, "ERROR: Input .bam file must be specified as argument -i or --input\n\n");
+		fprintf(stderr, help, argv[0]);
+		return 1;
+	}
+
+	if(args->kmer_list == NULL) {
+		fprintf(stderr, "ERROR: The list of k-mers must be specified as argument -k or --kmers\n");
+		fprintf(stderr, help, argv[0]);
+		return 1;
+	}
+
+	return 0;
 }
 
