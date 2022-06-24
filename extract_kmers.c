@@ -23,51 +23,69 @@ KHASH_SET_INIT_STR(kmer_hash);
 // The output SAM file has no header in the current implementation
 // The k-mer list must be a text file with one k-mer per line
 
-// Usage extract_kmers <in.bam> <kmer_list.txt> > out.sam
-//
 // Creating a global table used to translate 4-bit integers into chars
-char nt_table[16] = {'*', 'A', 'C', '*',
-                    'G', '*', '*', '*',
-                    'T', '*', '*', '*',
-                    '*', '*', '*', 'N'};
+char nt_table[16] = "*AC*G***T******N";
 
-// A struct that holds the data required for a single thread to execute
+// A struct that holds the data required for a single analysis thread to execute
+//   kmer_table: a pointer to the hash table containing the k-mers
+//   hash_end:   the end of the hash table ; will not change after the table has been computed
+//   output:     a pointer to the sam output file
+//   header:     a pointer to the header
+//   bambuf:     a pointer to the buffered records being processed
+//   n_records:  the number of records that will be processed by this thread
+//   seq:        pointer to the sequence being queried
 typedef struct thread_data {
-	khash_t(kmer_hash) *kmer_table; // Pointer to the hash table containing the k-mers
-	khint_t hash_end; // the end of the hash table ; will not change after the table has been computed
-	samFile *output; // Pointer to the sam output file
-	sam_hdr_t *header; // Pointer to the header
-	bam1_t **bambuf; // Pointer to the buffered records being processed
-	int n_records; // the number of records that will be processed by this thread
-	char **seq; // Pointer to the sequence being queried
+	khash_t(kmer_hash) *kmer_table;
+	khint_t hash_end;
+	samFile *output;
+	sam_hdr_t *header;
+	bam1_t **bambuf;
+	int n_records;
+	char **seq;
 } thread_data;
 
-// A struct that holds the data for the decompression thread (the one that reads the bam file into memory)
+// A struct that holds the data for the decompression thread reading the bam file
+//   bamfile:  a pointer to the input bam file
+//   header:   a pointer to the header of the input bam file
+//   tmpbuf:   a pointer to the temporary buffer into which records are read
+//   max_read: the maximum number of records to read from the file (equal to buffer size)
+//   n_read:   the number of records read
 typedef struct buffer_data {
-	samFile *bamfile; // Pointer to the bam file that is being read from
-	sam_hdr_t *header; // The header of the bam file being read
-	bam1_t **tmpbuf; // The temporary buffer from which data will be copied to the main buffer
-	int max_read; // The maximum number of records to read from the file
-	int n_read; // The number of records that were read
+	samFile *bamfile;
+	sam_hdr_t *header;
+	bam1_t **tmpbuf;
+	int max_read;
+	int n_read;
 } buffer_data;
 
 // A struct that holds the data for copying the records from the temporary buffer to the main buffer
+//   tmpbuf:     a pointer to the temporary buffer into which records are read
+//   bambuf:     a pointer to the main buffer that is being processed by analysis threads
+//   seq:        a pointer to the character sequences of the reads associated with bambuf
+//   n_records:  the number of records that this thread must process
+//   max_length: the maximum length of reads; used to check that it does not exceed seq_alloc
 typedef struct copy_data {
-	bam1_t **tmpbuf; // A pointer to the temporary buffer
-	bam1_t **bambuf; // A pointer to the main buffer that is being processed
-	char **seq; // The character sequences of the reads associated with bambuf
-	int n_records; // The number of records that this thread must process
-	int max_length; // The maximum length of reads; used to check that it does not exceed seq_alloc
+	bam1_t **tmpbuf;
+	bam1_t **bambuf;
+	char **seq;
+	int n_records;
+	int max_length;
 } copy_data;
 
 // A struct that holds the parameters as read from the command line
+//   input_file:  name of the input bam file
+//   kmer_list:   name of the file containing the list of k-mers
+//   output_file: name of the output sam file
+//   n_threads:   number of analysis threads used
+//   bufsize:     number of records read at once into the buffer
+//   seq_alloc:   number of bytes to allocate for the read sequence (read length + 1 for ending NULL)
 typedef struct params {
-	char* input_file; // the name of the input bam file
-	char* kmer_list; // the name of the file containing the list
-	char* output_file; // the name of the output sam file
-	int n_threads; // The number of threads used
-	int bufsize; // The number of records read at once into the buffer
-	int seq_alloc; // The number of bytes to allocate for the read sequence (read length + 1 for ending NULL)
+	char* input_file;
+	char* kmer_list;
+	char* output_file;
+	int n_threads;
+	int bufsize;
+	int seq_alloc;
 } params;
 
 // A global lock used to prevent threads from writing to the output file simultaneously
@@ -163,14 +181,12 @@ int main(int argc, char* argv[]) {
 	while(fgets(forward_kmers[n_kmers], KMER_LENGTH + 2, kmer_list) != NULL) {
 		// Removing the newline character from the string	
 		forward_kmers[n_kmers][strcspn(forward_kmers[n_kmers], "\n")] = '\0';
-		fprintf(stderr, "Read kmer %s\n", forward_kmers[n_kmers]);
 		n_kmers++;
 	}
 
 	// Creating a reverse-complemented version of the k-mers
 	for(int i = 0; i < n_kmers; i++) {
-		if(revcomp(forward_kmers[i], reverse_kmers[i]) != 0) return 2;
-		fprintf(stderr, "Generated reverse-complemented sequence %s for: %s\n", reverse_kmers[i], forward_kmers[i]);
+		if(revcomp(forward_kmers[i], reverse_kmers[i]) != 0) exit(1);
 	}
 
 	// Creating a common array with both forward and reverse k-mers together
@@ -182,29 +198,10 @@ int main(int argc, char* argv[]) {
 	}
 
 	// Adding all k-mers to the hash table
-	for(int i = 0; i < (2 * n_kmers); i++) {
-		kh_put(kmer_hash, kmer_table, all_kmers[i], &khash_return);
-	}
+	for(int i = 0; i < (2 * n_kmers); i++) kh_put(kmer_hash, kmer_table, all_kmers[i], &khash_return);
 
 	// Getting the end position of the hash table
 	hash_end = kh_end(kmer_table);
-
-	/* DEBUG to test the hash table
-	// The string to check is the third argument on the command line
-	if(kh_get(kmer_hash, kmer_table, argv[3]) == kh_end(kmer_table)) {
-		fprintf(stderr, "k-mer sequence %s is not in k-mer hash table\n", argv[3]);
-	} else {
-		fprintf(stderr, "k-mer sequence %s is in k-mer hash table\n", argv[3]);
-	}
-
-	return 0;
-	 DEBUG */
-
-	/* DEBUG
-	for(int i = 0; i < (n_kmers * 2); i++) {
-		fprintf(stderr, "all_kmers[%d]: %s\n", i, all_kmers[i]);
-	}
-	DEBUG */
 
 	// Creating an array of thread_data structs with as many elements as there are threads
 	// The copy chunks which are meant for copying the data from tmpbuf to bambuf wiht multithreading are also processed here
@@ -229,31 +226,20 @@ int main(int argc, char* argv[]) {
 		copy_chunks[i].max_length = args.seq_alloc;
 	}
 
-	/* DEBUG
-	for(int i = 0; i < n_chunks; i++) {
-		fprintf(stderr, "Chunk #%d:\n", i);
-		for(int j = 0; j < thread_chunks[i].n_kmers; j++) {
-			fprintf(stderr, "%s\n", thread_chunks[i].kmers[j]);
-		}
-	}
-
-	return 0;
-	DEBUG */
-
-	// Creating the array of threads
+	// Creating the array of analysis threads
 	threads = (pthread_t*) malloc(args.n_threads * sizeof(pthread_t));
 
 	// Initializing the lock
 	if(pthread_mutex_init(&lock, NULL) != 0) {
 		fprintf(stderr, "mutex init has failed\n");
-		return 1;
+		exit(1);
 	}
 
 	// Filling the temporary buffer by preparing the data and running the associated thread
 	bufdata.bamfile = input;
 	bufdata.header = header;
 	bufdata.tmpbuf = tmpbuf;
-	bufdata.max_read = args.bufsize; // The maximum number of records to read from the file
+	bufdata.max_read = args.bufsize;
 
 	pthread_create(&bufthread, NULL, fillbuf, &bufdata);
 	pthread_join(bufthread, NULL);
@@ -265,28 +251,15 @@ int main(int argc, char* argv[]) {
 
 		// Copying data from the temporary buffer to the one used for analysis
 		// With multithreading
-		for(int i = 0; i < args.n_threads; i++) {
-			pthread_create(&threads[i], NULL, copy_buf, &copy_chunks[i]);
-		}
-
-		// Joining the copying threads before going any further
-		for(int i = 0; i < args.n_threads; i++) {
-			pthread_join(threads[i], NULL);
-		}
+		for(int i = 0; i < args.n_threads; i++) pthread_create(&threads[i], NULL, copy_buf, &copy_chunks[i]);
+		for(int i = 0; i < args.n_threads; i++) pthread_join(threads[i], NULL);
 
 		// We no longer need the data in tmpbuf so we can launch the decompression thread
 		pthread_create(&bufthread, NULL, fillbuf, &bufdata);
 
-		// Now we need to generate the character string representation of the sequences in the bam file
-		// This is multithreaded
-		for(int i = 0; i < args.n_threads; i++) {
-			pthread_create(&threads[i], NULL, prepare_seq, &copy_chunks[i]);
-		}
-
-		// Joining the copying threads before going any further
-		for(int i = 0; i < args.n_threads; i++) {
-			pthread_join(threads[i], NULL);
-		}
+		// Generate the character string representation of the sequences in the bam file
+		for(int i = 0; i < args.n_threads; i++) pthread_create(&threads[i], NULL, prepare_seq, &copy_chunks[i]);
+		for(int i = 0; i < args.n_threads; i++) pthread_join(threads[i], NULL);
 
 		// If we filled the buffer then the number of executing threads is args.n_threads
 		if(n_read == args.bufsize) {
@@ -301,24 +274,22 @@ int main(int argc, char* argv[]) {
 				executing_threads = n_read / records_per_thread + 1;
 			}
 
-			fprintf(stderr, "Buffer did not fill completely.");
-			fprintf(stderr, "Rest of file will be processed by %d threads processing %d records each and one thread processing %d records.\n",
-					executing_threads - 1, records_per_thread, (n_read - (executing_threads - 1) * records_per_thread));
-			thread_chunks[executing_threads - 1].n_records = (n_read - (executing_threads - 1) * records_per_thread);
+			fprintf(stderr, "Buffer did not fill completely.\n"
+					"Remaining records processed by %d threads processing "
+					"%d records and one thread processing %d records.\n",
+					executing_threads - 1,
+					records_per_thread, 
+					n_read - (executing_threads - 1) * records_per_thread);
+
+			thread_chunks[executing_threads - 1].n_records = n_read - (executing_threads - 1) * records_per_thread;
 		}
 
-		// Launching the threads
-		for(int i = 0; i < executing_threads; i++) {
-			pthread_create(&threads[i], NULL, match_kmers, &thread_chunks[i]);
-		}
-
-		// Joining the threads
-		for(int i = 0; i < executing_threads; i++) {
-			pthread_join(threads[i], NULL);
-		}
+		// Launching the analysis threads
+		for(int i = 0; i < executing_threads; i++) pthread_create(&threads[i], NULL, match_kmers, &thread_chunks[i]);
+		for(int i = 0; i < executing_threads; i++) pthread_join(threads[i], NULL);
 
 		n_processed += n_read;
-		if(n_processed % 1000000 == 0) fprintf(stderr, "%lld reads processed using %d threads\n", n_processed, executing_threads);
+		if(n_processed % 100000 == 0) fprintf(stderr, "%lld reads processed using %d threads\n", n_processed, executing_threads);
 
 		// We wait for the buffer to be filled before starting the loop again
 		pthread_join(bufthread, NULL);
@@ -390,11 +361,9 @@ int revcomp(char *forward, char *reverse) {
 				break;
 
 			default:
-				fprintf(stderr, "Error! Unknown nucleotide found in k-mer sequence %s\n", forward);
+				fprintf(stderr, "ERROR: Unknown nucleotide found in k-mer sequence %s\n", forward);
 				return 1;
 		}
-
-
 	}
 
 	// Ending the array with a NULL character to indicate the end of the string
