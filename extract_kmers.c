@@ -9,20 +9,11 @@
 #include "sam.h"
 #include "khash.h"
 
-// The amount of memory allocated for the read sequence
-#define READ_ALLOC 300
-
 // The length of the k-mers
 #define KMER_LENGTH 31
 
 // The maximum number of k-mers that the program can process
 #define MAX_KMERS 100000
-
-// The maximum number of records that can be recorded in the buffer at one time
-#define BUFSIZE 1000000
-
-// The number of threads that the program can use
-#define N_THREADS 5
 
 // Initializing a hash table type named "kmer_hash" using klib's khash functions
 KHASH_SET_INIT_STR(kmer_hash);
@@ -66,6 +57,7 @@ typedef struct copy_data {
 	bam1_t **bambuf; // A pointer to the main buffer that is being processed
 	char **seq; // The character sequences of the reads associated with bambuf
 	int n_records; // The number of records that this thread must process
+	int max_length; // The maximum length of reads; used to check that it does not exceed seq_alloc
 } copy_data;
 
 // A struct that holds the parameters as read from the command line
@@ -73,6 +65,9 @@ typedef struct params {
 	char* input_file; // the name of the input bam file
 	char* kmer_list; // the name of the file containing the list
 	char* output_file; // the name of the output sam file
+	int n_threads; // The number of threads used
+	int bufsize; // The number of records read at once into the buffer
+	int seq_alloc; // The number of bytes to allocate for the read sequence (read length + 1 for ending NULL)
 } params;
 
 // A global lock used to prevent threads from writing to the output file simultaneously
@@ -108,7 +103,7 @@ int parse_args(int argc, char* argv[], params *args);
 int main(int argc, char* argv[]) {
 
 	// Parsing the command-line arguments
-	params args = {NULL, NULL, "-"};
+	params args = {NULL, NULL, "-", 1, 100000, 300};
 	if(parse_args(argc, argv, &args) != 0) return 1;
 
 	// Processing the command-line arguments
@@ -118,7 +113,7 @@ int main(int argc, char* argv[]) {
 	// Declaring simple variables
 	int n_read, records_per_thread, executing_threads, n_kmers = 0, khash_return;
 	long long int n_processed = 0;
-	char **seq = (char**) malloc(BUFSIZE * sizeof(char*));
+	char **seq = (char**) malloc(args.bufsize * sizeof(char*));
 
 	// Declaring an array containing the data processed by each thread
 	thread_data *thread_chunks;
@@ -147,15 +142,14 @@ int main(int argc, char* argv[]) {
 	assert(header != NULL);
 
         // Initializing buffers to store several alignment records
-        bam1_t **bambuf = (bam1_t**) malloc(BUFSIZE * sizeof(bam1_t*));
-        bam1_t **tmpbuf = (bam1_t**) malloc(BUFSIZE * sizeof(bam1_t*));
+        bam1_t **bambuf = (bam1_t**) malloc(args.bufsize * sizeof(bam1_t*));
+        bam1_t **tmpbuf = (bam1_t**) malloc(args.bufsize * sizeof(bam1_t*));
 
-        for(int i = 0; i < BUFSIZE; i++) {
+        for(int i = 0; i < args.bufsize; i++) {
                 bambuf[i] = bam_init1();
                 tmpbuf[i] = bam_init1();
-                seq[i] = (char*) malloc(READ_ALLOC * sizeof(char));
+                seq[i] = (char*) malloc((args.seq_alloc + 1) * sizeof(char));
         }
-	
 
 	// Allocating memory for the k-mer arrays and reading the k-mers from file
 	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
@@ -212,17 +206,14 @@ int main(int argc, char* argv[]) {
 	}
 	DEBUG */
 
-	// Setting the data for multithreading
-	assert(BUFSIZE % N_THREADS == 0);
-
 	// Creating an array of thread_data structs with as many elements as there are threads
 	// The copy chunks which are meant for copying the data from tmpbuf to bambuf wiht multithreading are also processed here
-	thread_chunks = (thread_data*) malloc(N_THREADS * sizeof(thread_data));
-	copy_chunks = (copy_data*) malloc(N_THREADS * sizeof(copy_data));
-	records_per_thread = BUFSIZE / N_THREADS;
+	thread_chunks = (thread_data*) malloc(args.n_threads * sizeof(thread_data));
+	copy_chunks = (copy_data*) malloc(args.n_threads * sizeof(copy_data));
+	records_per_thread = args.bufsize / args.n_threads;
 
 	// Initializing the chunk elements
-	for(int i = 0; i < N_THREADS; i++) {
+	for(int i = 0; i < args.n_threads; i++) {
 		thread_chunks[i].kmer_table = kmer_table;
 		thread_chunks[i].hash_end = hash_end;
 		thread_chunks[i].output = output;
@@ -235,6 +226,7 @@ int main(int argc, char* argv[]) {
 		copy_chunks[i].bambuf = bambuf + i * records_per_thread;
 		copy_chunks[i].seq = seq + i * records_per_thread;
 		copy_chunks[i].n_records = records_per_thread; // we won't care about adjusting this at the end of file for now
+		copy_chunks[i].max_length = args.seq_alloc;
 	}
 
 	/* DEBUG
@@ -249,7 +241,7 @@ int main(int argc, char* argv[]) {
 	DEBUG */
 
 	// Creating the array of threads
-	threads = (pthread_t*) malloc(N_THREADS * sizeof(pthread_t));
+	threads = (pthread_t*) malloc(args.n_threads * sizeof(pthread_t));
 
 	// Initializing the lock
 	if(pthread_mutex_init(&lock, NULL) != 0) {
@@ -261,7 +253,7 @@ int main(int argc, char* argv[]) {
 	bufdata.bamfile = input;
 	bufdata.header = header;
 	bufdata.tmpbuf = tmpbuf;
-	bufdata.max_read = BUFSIZE; // The maximum number of records to read from the file
+	bufdata.max_read = args.bufsize; // The maximum number of records to read from the file
 
 	pthread_create(&bufthread, NULL, fillbuf, &bufdata);
 	pthread_join(bufthread, NULL);
@@ -273,12 +265,12 @@ int main(int argc, char* argv[]) {
 
 		// Copying data from the temporary buffer to the one used for analysis
 		// With multithreading
-		for(int i = 0; i < N_THREADS; i++) {
+		for(int i = 0; i < args.n_threads; i++) {
 			pthread_create(&threads[i], NULL, copy_buf, &copy_chunks[i]);
 		}
 
 		// Joining the copying threads before going any further
-		for(int i = 0; i < N_THREADS; i++) {
+		for(int i = 0; i < args.n_threads; i++) {
 			pthread_join(threads[i], NULL);
 		}
 
@@ -287,18 +279,18 @@ int main(int argc, char* argv[]) {
 
 		// Now we need to generate the character string representation of the sequences in the bam file
 		// This is multithreaded
-		for(int i = 0; i < N_THREADS; i++) {
+		for(int i = 0; i < args.n_threads; i++) {
 			pthread_create(&threads[i], NULL, prepare_seq, &copy_chunks[i]);
 		}
 
 		// Joining the copying threads before going any further
-		for(int i = 0; i < N_THREADS; i++) {
+		for(int i = 0; i < args.n_threads; i++) {
 			pthread_join(threads[i], NULL);
 		}
 
-		// If we filled the buffer then the number of executing threads is N_THREADS
-		if(n_read == BUFSIZE) {
-			executing_threads = N_THREADS;
+		// If we filled the buffer then the number of executing threads is args.n_threads
+		if(n_read == args.bufsize) {
+			executing_threads = args.n_threads;
 		} else {
 			// Otherwise there will be a certain number of threads that process
 			// the usual number of records, and the last thread will process
@@ -340,7 +332,7 @@ int main(int argc, char* argv[]) {
 
 	sam_hdr_destroy(header);
 
-	for(int i = 0; i < BUFSIZE; i++) {
+	for(int i = 0; i < args.bufsize; i++) {
 		bam_destroy1(bambuf[i]);
 		bam_destroy1(tmpbuf[i]);
 		free(seq[i]);
@@ -481,6 +473,10 @@ void *prepare_seq(void *input) {
 		// Also preparing the seq array by converting the native bam format to a character string
 		bamseq = bam_get_seq(data->bambuf[i]); // Pointer to the start of the sequence
 		seqlength = data->bambuf[i]->core.l_qseq; // Length of the sequence
+		if(seqlength > data->max_length) {
+			fprintf(stderr, "Read length %d greater than maximum permissible value (%d)\n", seqlength, data->max_length);
+			exit(1);
+		}
 
 		// Filling the seq memory segment with the character sequence
 		bamseq_to_char(bamseq, data->seq[i], seqlength);
@@ -493,21 +489,27 @@ int parse_args(int argc, char* argv[], params *args) {
 	char param;
 
 	char *help = "Usage: %s -i <input.bam> -k <kmer_list.txt>\n"
-		"\t-i, --input:  Input file in bam format (required)\n"
-		"\t-k, --kmers:  List of k-mers to look for in the reads (required)\n"
-		"\t-o, --output: Name of the output file in same format (default: stdout)\n"
-		"\t-h, --help:   Print this help message\n";
+		"\t-i, --input:     Input file in bam format (required)\n"
+		"\t-k, --kmers:     List of k-mers to look for in the reads (required)\n"
+		"\t-o, --output:    Name of the output file in same format (default: stdout)\n"
+		"\t-t, --threads:   Number of analysis threads used in addition to decompression thread (default: 1)\n"
+		"\t-b, --bufsize:   Number of records stored in the buffers (default: 100,000)\n"
+		"\t-m, --maxlength: Maximum read length allowed, used for memory allocation (default: 300)\n"
+		"\t-h, --help:      Print this help message\n";
 
 	// Using getopt_long for parsing the arguments
 	struct option long_options[] = {
-		{"input",  required_argument, 0,  'i'},
-		{"kmers",  required_argument, 0,  'k'},
-		{"output", required_argument, 0,  'o'},
-		{"help",   no_argument,       0,  'h'},
-		{0,        0,                 0,   0 }
+		{"input",     required_argument, 0,  'i'},
+		{"kmers",     required_argument, 0,  'k'},
+		{"output",    required_argument, 0,  'o'},
+		{"threads",   required_argument, 0,  't'},
+		{"bufsize",   required_argument, 0,  'b'},
+		{"maxlength", required_argument, 0,  'm'},
+		{"help",      no_argument,       0,  'h'},
+		{0,           0,                 0,   0 }
 	};
 
-	while((param = getopt_long(argc, argv, "i:k:o:h", long_options, &longindex)) != -1) {
+	while((param = getopt_long(argc, argv, "i:k:o:t:b:m:h", long_options, &longindex)) != -1) {
 		switch(param) {
 			case 'i':
 				args->input_file = strdup(optarg);
@@ -517,6 +519,15 @@ int parse_args(int argc, char* argv[], params *args) {
 				break;
 			case 'o':
 				args->output_file = strdup(optarg);
+				break;
+			case 't':
+				args->n_threads = atoi(optarg);
+				break;
+			case 'b':
+				args->bufsize = atoi(optarg);
+				break;
+			case 'm':
+				args->seq_alloc = atoi(optarg);
 				break;
 			case 'h':
 			case '?':
@@ -537,6 +548,13 @@ int parse_args(int argc, char* argv[], params *args) {
 
 	if(args->kmer_list == NULL) {
 		fprintf(stderr, "ERROR: The list of k-mers must be specified as argument -k or --kmers\n");
+		fprintf(stderr, help, argv[0]);
+		return 1;
+	}
+
+	// Checking that the bufsize is a multiple of the number of threads
+	if(args->bufsize % args->n_threads != 0) {
+		fprintf(stderr, "ERROR: Buffer size (-b) must be a multiple of the number of threads (-t)\n");
 		fprintf(stderr, help, argv[0]);
 		return 1;
 	}
