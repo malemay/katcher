@@ -34,36 +34,34 @@ void bamseq_to_char(uint8_t *bamseq, char *seq, int seqlength) {
 }
 
 // revcomp
-int revcomp(char *forward, char *reverse) {
+void revcomp(char *forward, char *reverse, int kmer_length) {
 
-	for(int i = 0; i < KMER_LENGTH; i++) {
+	for(int i = 0; i < kmer_length; i++) {
 		switch (forward[i]) {
 			case 'A':
-				reverse[KMER_LENGTH - 1 - i] = 'T';
+				reverse[kmer_length - 1 - i] = 'T';
 				break;
 
 			case 'T':
-				reverse[KMER_LENGTH - 1 - i] = 'A';
+				reverse[kmer_length - 1 - i] = 'A';
 				break;
 
 			case 'G':
-				reverse[KMER_LENGTH - 1 - i] = 'C';
+				reverse[kmer_length - 1 - i] = 'C';
 				break;
 
 			case 'C':
-				reverse[KMER_LENGTH - 1 - i] = 'G';
+				reverse[kmer_length - 1 - i] = 'G';
 				break;
 
 			default:
 				fprintf(stderr, "ERROR: Unknown nucleotide found in k-mer sequence %s\n", forward);
-				return 1;
+				exit(1);
 		}
 	}
 
 	// Ending the array with a NULL character to indicate the end of the string
-	reverse[KMER_LENGTH] = '\0';
-
-	return 0;
+	reverse[kmer_length] = '\0';
 }
 
 // A function that checks whether the k-mers in a given read are found in the k-mer hash table
@@ -238,4 +236,44 @@ void init_buffers(bam1_t **bambuf, bam1_t **tmpbuf, char **seq, int bufsize, int
 		}
         }
 }
+
+// A function to read a list of k-mers from a text file
+char **read_kmers(FILE *kmer_list, int n_init, int kmer_length, int *n_kmers) {
+	// Creating an array of strings to store the k-mers as they are read
+	char **kmers = (char**) malloc(n_init * sizeof(char*));
+	int array_size = n_init;
+
+	for(int i = 0; i < array_size; i++) kmers[i] = (char*) malloc((kmer_length + 1) * sizeof(char));
+
+	// The number of records read from file
+	*n_kmers = 0;
+
+	while(fgets(kmers[*n_kmers], kmer_length + 2, kmer_list) != NULL) {
+		// Removing the newline character from the string	
+		kmers[*n_kmers][strcspn(kmers[*n_kmers], "\n")] = '\0';
+
+		// Checking that the length of the string is kmer_length
+		if(strlen(kmers[*n_kmers]) != kmer_length) {
+			fprintf(stderr, "The k-mer length parameter is %d but the length of k-mer %s is %d. Aborting.\n",
+					kmer_length, kmers[*n_kmers], strlen(kmers[*n_kmers]));
+			exit(1);
+		}
+		
+		// Computing the reverse complement of the k-mer and putting it in the next slot in the array
+		revcomp(kmers[*n_kmers], kmers[*n_kmers + 1], kmer_length);
+
+		*n_kmers += 2;
+
+		// Checking that the current array can hold at least the next two k-mers (forward and reverse)
+		if((*n_kmers + 1) >= array_size) {
+			array_size *= 2;
+			kmers = (char**) realloc(kmers, array_size * sizeof(char*));
+			for(int i = *n_kmers; i < array_size; i++) kmers[i] = (char*) malloc((kmer_length + 1) * sizeof(char));
+		}
+	}
+
+	return kmers;
+}
+
+
 

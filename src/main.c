@@ -21,9 +21,9 @@ int main(int argc, char* argv[]) {
 	if(parse_args(argc, argv, &args) != 0) return 1;
 
 	// Declaring simple variables
-	int n_read, records_per_thread, executing_threads, khash_return, n_kmers = 0;
+	int n_read, records_per_thread, executing_threads, khash_return, n_kmers;
 	long long int n_processed = 0;
-	char **forward_kmers, **reverse_kmers, **all_kmers, **seq;
+	char **all_kmers, **seq;
 	FILE *kmer_list = NULL;
 
 	// Declaring structs and struct arrays containing data passed to the threads for multithreading
@@ -71,39 +71,15 @@ int main(int argc, char* argv[]) {
 
 	init_buffers(bambuf, tmpbuf, seq, args.bufsize, args.seq_alloc);
 
-	// Allocating memory for the k-mer arrays and reading the k-mers from file
-	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
-	reverse_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
-
-	for(int i = 0; i < MAX_KMERS; i++) {
-		forward_kmers[i] = (char*) malloc((KMER_LENGTH + 2) * sizeof(char));
-		reverse_kmers[i] = (char*) malloc((KMER_LENGTH + 2) * sizeof(char));
-	}
-
 	// Opening the file with the k-mer list
 	kmer_list = fopen(args.kmer_list, "r");
 
-	while(fgets(forward_kmers[n_kmers], KMER_LENGTH + 2, kmer_list) != NULL) {
-		// Removing the newline character from the string	
-		forward_kmers[n_kmers][strcspn(forward_kmers[n_kmers], "\n")] = '\0';
-		n_kmers++;
-	}
-
-	// Creating a reverse-complemented version of the k-mers
-	for(int i = 0; i < n_kmers; i++) {
-		if(revcomp(forward_kmers[i], reverse_kmers[i]) != 0) exit(1);
-	}
-
-	// Creating a common array with both forward and reverse k-mers together
-	all_kmers = (char**) malloc(n_kmers * 2 * sizeof(char*));
-
-	for(int i = 0; i < n_kmers; i++) {
-		all_kmers[i * 2] = forward_kmers[i];
-		all_kmers[i * 2 + 1] = reverse_kmers[i];
-	}
+	// Reading the k-mers from file
+	all_kmers = read_kmers(kmer_list, N_KMERS_INIT, KMER_LENGTH, &n_kmers);
+	fprintf(stderr, "Read %d k-mers from file %s.\n", n_kmers, args.kmer_list);
 
 	// Adding all k-mers to the hash table
-	for(int i = 0; i < (2 * n_kmers); i++) kh_put(kmer_hash, kmer_table, all_kmers[i], &khash_return);
+	for(int i = 0; i < n_kmers; i++) kh_put(kmer_hash, kmer_table, all_kmers[i], &khash_return);
 
 	// Getting the end position of the hash table
 	hash_end = kh_end(kmer_table);
@@ -214,13 +190,11 @@ int main(int argc, char* argv[]) {
 		free(seq[i]);
 	}
 
-	for(int i = 0; i < n_kmers; i++) {
-		free(forward_kmers[i]);
-		free(reverse_kmers[i]);
-	}
+	for(int i = 0; i < n_kmers; i++) free(all_kmers[i]);
 
-	free(forward_kmers);
-	free(reverse_kmers);
+	free(bambuf);
+	free(tmpbuf);
+	free(seq);
 	free(all_kmers);
 	free(thread_chunks);
 

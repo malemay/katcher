@@ -5,6 +5,9 @@
 #include <khash.h>
 #include <htslib/sam.h>
 
+// The initial size of the array of strings created to hold k-mers by read_kmer()
+#define N_KMERS_INIT 1000
+
 // The length of the k-mers
 #define KMER_LENGTH 31
 
@@ -98,7 +101,9 @@ void bamseq_to_char(uint8_t *bamseq, char *seq, int seqlength);
 // A function that generates the reverse-complemented version of a k-mer
 // forward: a pointer to an array of characters holding the forward k-mer
 // reverse: a pointer to an array of characters that will hold the reverse k-mer (must be sufficiently large)
-int revcomp(char *forward, char *reverse);
+// kmer_length: the length the the k-mers (must be the same for all k-mers)
+// n_kmers: the adress of an int variable where the number of k-mers read will be stored
+void revcomp(char *forward, char *reverse, int kmer_length);
 
 // A function that allows matching read sequence and k-mers with multithreading
 void *match_kmers(void *input);
@@ -114,5 +119,11 @@ void *prepare_seq(void *input);
 
 // A function to parse the command line arguments
 int parse_args(int argc, char* argv[], params *args);
+
+// A function to read a list of k-mers from a text file
+// kmer_list: a pointer to a file open for reading which contains the list of k-mers
+// n_init: the size to initialize the array of kmers with
+// kmer_length: the length of the k-mers (will throw an error if it does not correspond)
+char **read_kmers(FILE *kmer_list, int n_init, int kmer_length, int *n_kmers);
 
 #endif
