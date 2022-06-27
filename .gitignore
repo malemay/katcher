@@ -1,4 +1,7 @@
+katcher
 *.sam
 extract_kmers
 kmer*.txt
 SRR*txt
+*.o
+*.swp
