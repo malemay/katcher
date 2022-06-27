@@ -80,6 +80,14 @@ typedef struct params {
 	int seq_alloc;
 } params;
 
+// A function that initializes the buffers used by the program
+// bambuf: a pointer to the buffer that will store the alignments being processd
+// tmpbuf: a pointer to the temporary buffer of alignments into which the records are read from file
+// seq: a pointer to an array of strings that will hold the read sequences
+// bufsize: the maximum number of records or sequences that can be in the buffer at any given time
+// max_length: the maximum length that a read can be (determines the memory allocated to each sequence)
+void init_buffers(bam1_t **bambuf, bam1_t **tmpbuf, char **seq, int bufsize, int max_length);
+
 // A function that takes the read sequence as encoded by 4-bit nucleotides
 // in the BAM format and converts it to a string
 // bamseq: a pointer to the start of the sequence in the BAM file

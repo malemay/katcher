@@ -20,21 +20,16 @@ int main(int argc, char* argv[]) {
 	params args = {NULL, NULL, "-", 1, 100000, 300};
 	if(parse_args(argc, argv, &args) != 0) return 1;
 
-	// Processing the command-line arguments
-	FILE *kmer_list = fopen(args.kmer_list, "r");
-	char **forward_kmers, **reverse_kmers, **all_kmers;
-
 	// Declaring simple variables
-	int n_read, records_per_thread, executing_threads, n_kmers = 0, khash_return;
+	int n_read, records_per_thread, executing_threads, khash_return, n_kmers = 0;
 	long long int n_processed = 0;
-	char **seq = (char**) malloc(args.bufsize * sizeof(char*));
+	char **forward_kmers, **reverse_kmers, **all_kmers, **seq;
+	FILE *kmer_list = NULL;
 
-	// Declaring an array containing the data processed by each thread
-	thread_data *thread_chunks;
-	// A struct containing the data for the decompression thread
-	buffer_data bufdata;
-	// Another array containing structs with data for the copying threads
-	copy_data *copy_chunks;
+	// Declaring structs and struct arrays containing data passed to the threads for multithreading
+	thread_data *thread_chunks; // Data for analysis threads
+	buffer_data bufdata; // Data for decompression thread
+	copy_data *copy_chunks; // Data for threads that copy data between buffers
 
 	// Declaring the array of threads and a thread for decompressing the file
 	pthread_t *threads = NULL, bufthread;
@@ -44,26 +39,37 @@ int main(int argc, char* argv[]) {
 	kmer_table = kh_init(kmer_hash);
 	khint_t hash_end;
 
-	// Declaring and initializing htslib-related variables
+	// Declaring and initializing htslib-related files and variables
+        bam1_t **bambuf, **tmpbuf;
+
 	samFile *input = sam_open(args.input_file, "r");
-	assert(input != NULL);
+	if(input == NULL) {
+		fprintf(stderr, "Error opening file %s for reading. Aborting.\n", args.input_file);
+		exit(1);
+	}
 
 	samFile *output = hts_open(args.output_file, "w");
-	assert(output != NULL);
+	if(output == NULL) {
+		fprintf(stderr, "Error opening file %s for writing. Aborting.\n", args.output_file);
+		exit(1);
+	}
 
 	sam_hdr_t *header = sam_hdr_init();
 	header = sam_hdr_read(input);
-	assert(header != NULL);
+	if(header == NULL) {
+		fprintf(stderr, "Error reading header from file %s. Aborting.\n", args.input_file);
+		exit(1);
+	}
 
-        // Initializing buffers to store several alignment records
-        bam1_t **bambuf = (bam1_t**) malloc(args.bufsize * sizeof(bam1_t*));
-        bam1_t **tmpbuf = (bam1_t**) malloc(args.bufsize * sizeof(bam1_t*));
+        // Initializing buffers for alignment records and sequence
+        bambuf = (bam1_t**) malloc(args.bufsize * sizeof(bam1_t*));
+	assert(bambuf != NULL);
+        tmpbuf = (bam1_t**) malloc(args.bufsize * sizeof(bam1_t*));
+	assert(tmpbuf != NULL);
+	seq = (char**) malloc(args.bufsize * sizeof(char*));
+	assert(seq != NULL);
 
-        for(int i = 0; i < args.bufsize; i++) {
-                bambuf[i] = bam_init1();
-                tmpbuf[i] = bam_init1();
-                seq[i] = (char*) malloc((args.seq_alloc + 1) * sizeof(char));
-        }
+	init_buffers(bambuf, tmpbuf, seq, args.bufsize, args.seq_alloc);
 
 	// Allocating memory for the k-mer arrays and reading the k-mers from file
 	forward_kmers = (char**) malloc(MAX_KMERS * sizeof(char*));
@@ -73,6 +79,9 @@ int main(int argc, char* argv[]) {
 		forward_kmers[i] = (char*) malloc((KMER_LENGTH + 2) * sizeof(char));
 		reverse_kmers[i] = (char*) malloc((KMER_LENGTH + 2) * sizeof(char));
 	}
+
+	// Opening the file with the k-mer list
+	kmer_list = fopen(args.kmer_list, "r");
 
 	while(fgets(forward_kmers[n_kmers], KMER_LENGTH + 2, kmer_list) != NULL) {
 		// Removing the newline character from the string	

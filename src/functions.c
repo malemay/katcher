@@ -225,3 +225,17 @@ int parse_args(int argc, char* argv[], params *args) {
 	return 0;
 }
 
+void init_buffers(bam1_t **bambuf, bam1_t **tmpbuf, char **seq, int bufsize, int max_length) {
+
+        for(int i = 0; i < bufsize; i++) {
+                bambuf[i] = bam_init1();
+                tmpbuf[i] = bam_init1();
+                seq[i] = (char*) malloc((max_length + 1) * sizeof(char));
+
+		if(seq[i] == NULL) {
+			fprintf(stderr, "Unable to allocate memory for read sequences. Aborting.\n");
+			exit(1);
+		}
+        }
+}
+
