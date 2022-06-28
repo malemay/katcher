@@ -1,8 +1,7 @@
 bin/
 *.sam
+*.bam
 extract_kmers
-kmer*.txt
-SRR*txt
-test.txt
+*.txt
 *.o
 *.swp

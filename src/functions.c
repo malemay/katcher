@@ -71,11 +71,19 @@ void revcomp(char *forward, char *reverse, int kmer_length) {
 // However, this should be taken into account if the implementation were to change
 void *match_kmers(void *input) {
 	thread_data* chunk = (thread_data*) input;
-	int write_op, seqlength;
-	char *j, *seqstart;
+	int write_op, seqlength, match, tag_size;
+	char *j, *seqstart, *km_tag;
 
 	// Iterating over all the records
 	for(int i = 0; i < chunk->n_records; i++) {
+
+		// Resetting the match flag
+		match = 0;
+
+		// Initializing the KM tag to an empty string
+		tag_size = (KMER_LENGTH + 2) * 10;
+		km_tag = (char*) malloc(tag_size * sizeof(char));
+		km_tag[0] = '\0';
 
 		// Getting the length of the read and a pointer to its start
 		seqlength = strlen(chunk->seq[i]);
@@ -87,14 +95,43 @@ void *match_kmers(void *input) {
 
 			// Checking if the k-mer until the end of the read is found in the k-mer hash table
 			if(kh_get(kmer_hash, chunk->kmer_table, j - KMER_LENGTH + 1) != chunk->hash_end) {
-				pthread_mutex_lock(&lock);
-				write_op = sam_write1(chunk->output, chunk->header, chunk->bambuf[i]);
-				pthread_mutex_unlock(&lock);
+				// Then we first mark this record as having to be written
+				match = 1;
+
+				// Then we add the k-mer being queried to the aux KM tag that will be written
+				if(strlen(km_tag) + KMER_LENGTH + 2 >= tag_size) {
+					tag_size *= 2;
+					km_tag = (char*) realloc(km_tag, tag_size * sizeof(char));
+				}
+
+				if(strlen(km_tag)) {
+					strcat(km_tag, ",");
+				}
+
+				if(strcat(km_tag, j - KMER_LENGTH + 1) == NULL) {
+					fprintf(stderr, "Error concatenating k-mer %s to auxiliary tag.\n", j - KMER_LENGTH + 1);
+					exit(1);
+				}
 			}
 
 			// Setting the last character in the string to \0 so we can process the next k-mer
 			*j = '\0';
 		}
+
+		// At the end of this record we check if it should be written to output
+		if(match == 1) {
+			// If it does we append the KM tag to the record and then write it to file
+			if(bam_aux_append(chunk->bambuf[i], "KM", 'Z', strlen(km_tag) + 1, km_tag) != 0) {
+				fprintf(stderr, "Error appending KM tag %s to BAM record. Aborting.\n", km_tag);
+				exit(1);
+			}
+
+			pthread_mutex_lock(&lock);
+			write_op = sam_write1(chunk->output, chunk->header, chunk->bambuf[i]);
+			pthread_mutex_unlock(&lock);
+		}
+
+		free(km_tag);
 	}
 }
 
@@ -152,7 +189,7 @@ int parse_args(int argc, char* argv[], params *args) {
 	char *help = "Usage: %s -i <input.bam> -k <kmer_list.txt>\n"
 		"\t-i, --input:     Input file in bam format (required)\n"
 		"\t-k, --kmers:     List of k-mers to look for in the reads (required)\n"
-		"\t-o, --output:    Name of the output file in same format (default: stdout)\n"
+		"\t-o, --output:    Name of the output file in bam format (default: stdout)\n"
 		"\t-t, --threads:   Number of analysis threads used in addition to decompression thread (default: 1)\n"
 		"\t-b, --bufsize:   Number of records stored in the buffers (default: 100,000)\n"
 		"\t-m, --maxlength: Maximum read length allowed, used for memory allocation (default: 300)\n"

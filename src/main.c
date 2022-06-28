@@ -11,8 +11,7 @@
 #include "functions.h"
 
 // This program takes a bam file and a list of k-mers as input, and outputs all
-// reads containing these kmers or their reverse complement in SAM format
-// The output SAM file has no header in the current implementation
+// reads containing these kmers or their reverse complement in BAM format
 // The k-mer list must be a text file with one k-mer per line
 int main(int argc, char* argv[]) {
 
@@ -48,7 +47,7 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	samFile *output = hts_open(args.output_file, "w");
+	samFile *output = hts_open(args.output_file, "wb");
 	if(output == NULL) {
 		fprintf(stderr, "Error opening file %s for writing. Aborting.\n", args.output_file);
 		exit(1);
@@ -58,6 +57,12 @@ int main(int argc, char* argv[]) {
 	header = sam_hdr_read(input);
 	if(header == NULL) {
 		fprintf(stderr, "Error reading header from file %s. Aborting.\n", args.input_file);
+		exit(1);
+	}
+
+	// Copying the header to the output file
+	if(sam_hdr_write(output, header) != 0) {
+		fprintf(stderr, "Error writing header to output file. Aborting.\n");
 		exit(1);
 	}
 

@@ -19,5 +19,5 @@ $(ODIR)/%.o: $(SRC)/%.c $(DEPS)
 		$(CC) -c -o $@ $< $(CFLAGS)
 
 test: bin/katcher
-	bin/katcher -i ~/sv_gwas/usda_lines/merged_bams/SRR1533395/SRR1533395_merged.bam -k SRR1533395_all_kmers.txt -o SRR1533395_reads.sam -t6 -b 1200000 -m 100 
+	bin/katcher -i ~/sv_gwas/usda_lines/merged_bams/SRR1533395/SRR1533395_merged.bam -k SRR1533395_all_kmers.txt -o SRR1533395_reads.bam -t6 -b 1200000 -m 100 
 
