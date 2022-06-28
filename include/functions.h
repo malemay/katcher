@@ -5,6 +5,9 @@
 #include <khash.h>
 #include <htslib/sam.h>
 
+// The version of the program
+#define KATCHER_VERSION "0.1"
+
 // The initial size of the array of strings created to hold k-mers by read_kmer()
 #define N_KMERS_INIT 1000
 

@@ -22,7 +22,7 @@ int main(int argc, char* argv[]) {
 	// Declaring simple variables
 	int n_read, records_per_thread, executing_threads, khash_return, n_kmers;
 	long long int n_processed = 0;
-	char **all_kmers, **seq;
+	char **all_kmers, **seq, *cl_tag;
 	FILE *kmer_list = NULL;
 
 	// Declaring structs and struct arrays containing data passed to the threads for multithreading
@@ -60,7 +60,18 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	// Copying the header to the output file
+	// Adding a PG line to the header and writing it to the output file
+	cl_tag = stringify_argv(argc, argv);
+	if(cl_tag == NULL) {
+		fprintf(stderr, "Unable to generate string representation of command line. Aborting.\n");
+		exit(1);
+	}
+
+	if(sam_hdr_add_pg(header, "katcher", "VN", KATCHER_VERSION, "CL", cl_tag, NULL) != 0) {
+		fprintf(stderr, "Unable to add PG line to header. Aborting.\n");
+		exit(1);
+	}
+
 	if(sam_hdr_write(output, header) != 0) {
 		fprintf(stderr, "Error writing header to output file. Aborting.\n");
 		exit(1);
@@ -197,6 +208,7 @@ int main(int argc, char* argv[]) {
 
 	for(int i = 0; i < n_kmers; i++) free(all_kmers[i]);
 
+	free(cl_tag);
 	free(bambuf);
 	free(tmpbuf);
 	free(seq);
