@@ -1,7 +1,8 @@
-katcher
+bin/
 *.sam
 extract_kmers
 kmer*.txt
 SRR*txt
+test.txt
 *.o
 *.swp
