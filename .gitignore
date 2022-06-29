@@ -1,6 +1,7 @@
 bin/
 *.sam
 *.bam
+*.bai
 extract_kmers
 *.txt
 *.o

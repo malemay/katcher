@@ -7,13 +7,16 @@ LIBS=-lhts -lpthread
 DEPS = $(IDIR)/functions.h
 OBJ = $(ODIR)/functions.o $(ODIR)/main.o
 
-all: bin/katcher bin/list_kmers
+all: bin/katcher bin/list_kmers bin/add_pvalues
 
 bin/katcher: $(OBJ)
 		$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
+bin/add_pvalues: src/add_pvalues.c src/functions.c include/functions.h
+	$(CC) $(CFLAGS) -lhts -o bin/add_pvalues src/add_pvalues.c src/functions.c
+
 bin/list_kmers: src/list_kmers.c
-	gcc src/list_kmers.c -o bin/list_kmers
+	$(CC) src/list_kmers.c -o bin/list_kmers
 
 $(ODIR)/%.o: $(SRC)/%.c $(DEPS)
 		$(CC) -c -o $@ $< $(CFLAGS)
