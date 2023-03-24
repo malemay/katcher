@@ -8,7 +8,7 @@
 #include <getopt.h>
 
 #include <htslib/sam.h>
-#include <khash.h>
+#include <htslib/khash.h>
 
 // Global static variables used in this file
 // Creating a global table used to translate 4-bit integers into chars

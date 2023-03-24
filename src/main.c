@@ -6,7 +6,7 @@
 #include <pthread.h>
 
 #include <htslib/sam.h>
-#include <khash.h>
+#include <htslib/khash.h>
 
 #include "functions.h"
 
