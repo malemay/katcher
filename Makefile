@@ -25,5 +25,8 @@ $(ODIR)/%.o: $(SRC)/%.c $(DEPS)
 		$(CC) -c -o $@ $< $(CFLAGS)
 
 test: bin/katcher
-	bin/katcher -i ~/sv_gwas/usda_lines/merged_bams/SRR1533395/SRR1533395_merged.bam -k SRR1533395_all_kmers.txt -o SRR1533395_reads.bam -t6 -b 1200000 -m 100 
+	bin/list_kmers test/significant_pav_table.txt SRR1533395 > test/input_kmers.txt
+	bin/katcher -i test/input_test.bam -k test/input_kmers.txt -o test/reads_with_kmers.bam -t6 -b 600000 -m 300 
+	bin/add_pvalues test/reads_with_kmers.bam test/kmer_pvalues.txt > test/reads_with_pvalues.bam
+	bin/extract_qname test/reads_with_pvalues.bam test/input_test.bam > test/significant_pairs.bam
 
