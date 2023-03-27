@@ -291,7 +291,7 @@ char **read_kmers(FILE *kmer_list, int n_init, int kmer_length, int *n_kmers) {
 
 		// Checking that the length of the string is kmer_length
 		if(strlen(kmers[*n_kmers]) != kmer_length) {
-			fprintf(stderr, "The k-mer length parameter is %d but the length of k-mer %s is %d. Aborting.\n",
+			fprintf(stderr, "The k-mer length parameter is %d but the length of k-mer %s is %ld. Aborting.\n",
 					kmer_length, kmers[*n_kmers], strlen(kmers[*n_kmers]));
 			exit(1);
 		}

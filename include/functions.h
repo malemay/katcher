@@ -2,7 +2,7 @@
 #define FUNCTIONS_H
 
 #include <pthread.h>
-#include <khash.h>
+#include <htslib/khash.h>
 #include <htslib/sam.h>
 
 // The version of the program

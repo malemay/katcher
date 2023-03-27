@@ -150,7 +150,7 @@ void read_pvalues(char *input, khash_t(ktable) *hash_table) {
 
 	// Reading the first line of the file
 	if(fgets(buffer, BUFSIZE, pfile) == NULL) {
-		fprintf(stderr, "Unable to read input file %s. Aborting\n", pfile);
+		fprintf(stderr, "Unable to read input file %s. Aborting\n", input);
 		exit(1);
 	}
 
