@@ -2,7 +2,7 @@
 
 The katcher program aims to extract reads containing any of a set of *k*-mers
 from a BAM file. The program is written in the C language and makes use of
-multi-threading to improve execution speed. It uses the
+multithreading to improve execution speed. It uses the
 [htslib](https://github.com/samtools/htslib) library for reading/writing BAM
 files and its implementation of
 [khash](https://github.com/samtools/htslib/blob/develop/htslib/khash.h) for
@@ -68,13 +68,15 @@ for this program is:
 
 With the output being written to stdout. The p-value file must be a table
 of *k*-mers and their p-values as output by the *k*-mer GWAS approach, such
-as the `test/kmer_pvalues.txt` included in this repository.
+as the `test/kmer_pvalues.txt` included in this repository. the p-values
+will be added as a PV tag of comma-separated values corresponding to their
+matching KM tag.
 
 ### list_kmers
 
 Finally, the `list_kmers` program can be used to obtain a list of *k*-mers to
 use as input to `katcher` from a presence/absence table of *k*-mers and the
-name of a sample of interest. This can be useful to aboid looking for *k*-mers
+name of a sample of interest. This can be useful to avoid looking for *k*-mers
 that are known beforehand not to be present in a given sample. The usage
 for this program is:
 
@@ -89,9 +91,9 @@ program included in the *k*-mer GWAS suite of tools.
 ## Prerequisites
 
 You will need a Linux system with the
-[https://github.com/samtools/htslib](htslib) and pthread libraries installed in
+[htslib](https://github.com/samtools/htslib) and pthread libraries installed in
 order to compile and run `katcher` and associated binaries. Users will find
-that the `katcher` runs faster if htslib is compiled with libdeflate support,
+that `katcher` runs faster if htslib is compiled with libdeflate support,
 although this is not necessary. pthread should be installed by default on most
 Linux systems.
 
@@ -108,7 +110,7 @@ your `$PATH` or call them directly from that location.
 
 IMPORTANT: the *k*-mer length is a constant that is set at compile time. Be default, it is
 31. If you want to change it, you need to change the value of the `KMER_LENGTH` constant
-in `include/functions.h`.
+in `include/functions.h` and re-compile the binaries.
 
 ## Testing
 
