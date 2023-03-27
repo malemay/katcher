@@ -10,19 +10,24 @@ OBJ = $(ODIR)/functions.o $(ODIR)/main.o
 all: bin/katcher bin/list_kmers bin/add_pvalues bin/extract_qname
 
 bin/katcher: $(OBJ)
-		$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
+	mkdir -p bin
+	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
 
 bin/add_pvalues: src/add_pvalues.c src/functions.c include/functions.h
+	mkdir -p bin
 	$(CC) $(CFLAGS) -lhts -o bin/add_pvalues src/add_pvalues.c src/functions.c
 
 bin/list_kmers: src/list_kmers.c
+	mkdir -p bin
 	$(CC) src/list_kmers.c -o bin/list_kmers
 
 bin/extract_qname: src/extract_qname.c
+	mkdir -p bin
 	$(CC) $(CFLAGS) $(LIBS) -o bin/extract_qname src/extract_qname.c
 
 $(ODIR)/%.o: $(SRC)/%.c $(DEPS)
-		$(CC) -c -o $@ $< $(CFLAGS)
+	mkdir -p obj
+	$(CC) -c -o $@ $< $(CFLAGS)
 
 test: bin/katcher
 	bin/list_kmers test/significant_pav_table.txt SRR1533395 > test/input_kmers.txt
