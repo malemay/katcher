@@ -29,12 +29,12 @@ to include the reverse-complemented sequence of the *k*-mers that you are lookin
 `katcher` will automatically add them to the list of queried *k*-mers.
 
 `katcher` will append a `KM` tag to every read it extracts indicating which of the query
-*k*-mers were found. If there is more than one query *k*-mer found in the read, the value
-of the KM tag will be a list of comma-separated *k*-mers.
+*k*-mers were found. If there is more than one query *k*-mer in the read, the value
+of the `KM` tag will be a list of comma-separated *k*-mers.
 
 Because of the way multithreading is implemented at the moment, the `--bufsize`
 parameter must be a multiple of the number of threads specified by `--threads`. 
-`katcher` will complain accordingly if you do not.
+`katcher` will complain accordingly if this requirement is not met.
 
 ## Other software
 
@@ -68,9 +68,9 @@ for this program is:
 
 With the output being written to stdout. The p-value file must be a table
 of *k*-mers and their p-values as output by the *k*-mer GWAS approach, such
-as the `test/kmer_pvalues.txt` included in this repository. the p-values
-will be added as a PV tag of comma-separated values corresponding to their
-matching KM tag.
+as the `test/kmer_pvalues.txt` file included in this repository. the p-values
+will be added as a `PV` tag of comma-separated values corresponding to their
+matching `KM` tag.
 
 ### list_kmers
 
@@ -108,7 +108,7 @@ Once this is done, the following commands should be sufficient to compile the pr
 The four compiled binaries will be located in the bin/ directory. You can add them to
 your `$PATH` or call them directly from that location.
 
-IMPORTANT: the *k*-mer length is a constant that is set at compile time. Be default, it is
+IMPORTANT: the *k*-mer length is a constant that is set at compile time. By default, it is
 31. If you want to change it, you need to change the value of the `KMER_LENGTH` constant
 in `include/functions.h` and re-compile the binaries.
 
