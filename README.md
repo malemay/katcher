@@ -137,7 +137,9 @@ multithreading implementation should be improved.
 
 # Citation
 
-The reference to the katcher software will be uploaded shortly.
+If you use this software, plase cite our publication:
+
+Lemay, M.-A., de Ronne, M., Bélanger, R., & Belzile, F. (2023). k-mer-based GWAS enhances the discovery of causal variants and candidate genes in soybean. *The Plant Genome*, 16, e20374. [doi:10.1002/tpg2.20374](https://doi.org/10.1002/tpg2.20374)
 
 # References
 
