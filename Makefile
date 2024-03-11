@@ -1,9 +1,9 @@
-CC=gcc
+CC = gcc
 IDIR = include
 ODIR = obj
 SRC = src
-CFLAGS=-I ~/.local/include -L ~/.local/lib64 -I include
-LIBS=-lhts -lpthread
+CFLAGS = -I include -I ~/.local/include -L ~/.local/lib -L ~/.local/lib64
+LIBS = -lhts -lpthread
 DEPS = $(IDIR)/functions.h
 OBJ = $(ODIR)/functions.o $(ODIR)/main.o
 
@@ -11,15 +11,15 @@ all: bin/katcher bin/list_kmers bin/add_pvalues bin/extract_qname
 
 bin/katcher: $(OBJ)
 	mkdir -p bin
-	$(CC) -o $@ $^ $(CFLAGS) $(LIBS)
+	$(CC) $(CFLAGS) $(LIBS) -o $@ $^
 
 bin/add_pvalues: src/add_pvalues.c src/functions.c include/functions.h
 	mkdir -p bin
-	$(CC) $(CFLAGS) -lhts -o bin/add_pvalues src/add_pvalues.c src/functions.c
+	$(CC) $(CFLAGS) $(LIBS) -o bin/add_pvalues src/add_pvalues.c src/functions.c
 
 bin/list_kmers: src/list_kmers.c
 	mkdir -p bin
-	$(CC) src/list_kmers.c -o bin/list_kmers
+	$(CC) $(CFLAGS) $(LIBS) src/list_kmers.c -o bin/list_kmers
 
 bin/extract_qname: src/extract_qname.c
 	mkdir -p bin
@@ -27,7 +27,7 @@ bin/extract_qname: src/extract_qname.c
 
 $(ODIR)/%.o: $(SRC)/%.c $(DEPS)
 	mkdir -p obj
-	$(CC) -c -o $@ $< $(CFLAGS)
+	$(CC) $(CFLAGS) $(LIBS) -c -o $@ $<
 
 test: bin/katcher
 	bin/list_kmers test/significant_pav_table.txt SRR1533395 > test/input_kmers.txt
