@@ -12,7 +12,7 @@
 #define N_KMERS_INIT 1000
 
 // The length of the k-mers
-#define KMER_LENGTH 31
+#define KMER_LENGTH 25
 
 // The maximum number of k-mers that the program can process
 #define MAX_KMERS 100000
